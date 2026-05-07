@@ -283,6 +283,11 @@ function FlashcardContent() {
     );
   }
 
+  if (user && !user.hasPagoUnicoAccess) {
+    router.replace('/app/flashcards');
+    return null;
+  }
+
   if (!subtema) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen p-10 text-center">
