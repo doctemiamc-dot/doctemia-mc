@@ -2,6 +2,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactPlayer from 'react-player/youtube';
 import Swal from 'sweetalert2';
+import { cleanYouTubeUrl } from '@/lib/youtubeUtils';
+
+const SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 2];
 
 const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress, onDuration }) => {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -9,11 +12,48 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.8);
   const [muted, setMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [isFullScreen, setIsFullScreen] = useState(false);
+  const [isCssFullScreen, setIsCssFullScreen] = useState(false);
+  const [playerError, setPlayerError] = useState('');
   const playerRef = useRef(null);
   const containerRef = useRef(null);
+  const isCssFullScreenRef = useRef(false);
+
+  const normalizedUrl = cleanYouTubeUrl(url);
+
+  useEffect(() => {
+    setPlayerError('');
+    setPlayed(0);
+    setDuration(0);
+    setIsPlaying(false);
+    setShowSpeedMenu(false);
+  }, [normalizedUrl]);
+
+  useEffect(() => {
+    isCssFullScreenRef.current = isCssFullScreen;
+    if (typeof document === 'undefined') return;
+    if (isCssFullScreen) {
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = prevOverflow;
+      };
+    }
+  }, [isCssFullScreen]);
+
+  const isMobileOrTablet = () => {
+    if (typeof window === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    const isIOSOrAndroidUA = /iPhone|iPad|iPod|Android|Mobile/i.test(ua);
+    const isIPadOS = /Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+    const isCoarsePointer = window.matchMedia?.('(pointer: coarse)')?.matches;
+    return Boolean(isIOSOrAndroidUA || isIPadOS || isCoarsePointer);
+  };
 
   const showSecurityWarning = (message = 'Este contenido está protegido y la acción ha sido bloqueada.') => {
+    if (Swal.isVisible()) return;
     Swal.fire({
       title: 'Contenido Protegido',
       text: message,
@@ -26,9 +66,13 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
   };
 
   useEffect(() => {
+    const mobileDevice = isMobileOrTablet();
+
     const disableContextMenu = (e) => {
       e.preventDefault();
-      showSecurityWarning('El menú contextual ha sido deshabilitado.');
+      if (!mobileDevice) {
+        showSecurityWarning('El menú contextual ha sido deshabilitado.');
+      }
       return false;
     };
 
@@ -37,8 +81,15 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
       const ctrl = e.ctrlKey;
       const shift = e.shiftKey;
 
-      if (key === 'ESCAPE' && document.fullscreenElement) {
-        return; // Permitir ESC para salir de pantalla completa
+      if (key === 'ESCAPE') {
+        if (isCssFullScreenRef.current) {
+          setIsCssFullScreen(false);
+          setIsFullScreen(false);
+          return;
+        }
+        if (document.fullscreenElement) {
+          return; // Permitir ESC para salir de pantalla completa
+        }
       }
 
       if (key === 'F12' || (ctrl && shift && (key === 'I' || key === 'J' || key === 'C'))) {
@@ -71,21 +122,51 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
     document.addEventListener('selectstart', disableSelection);
     document.addEventListener('dragstart', disableDragStart);
 
+    const baselineDpr = window.devicePixelRatio || 1;
+    let devToolsWasOpen = false;
+
     const detectDevTools = () => {
-      if (document.fullscreenElement) return;
+      if (
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        isCssFullScreenRef.current ||
+        (window.visualViewport?.scale || 1) > 1.02
+      ) {
+        return;
+      }
+
+      // Compensar el zoom de página del navegador (Ctrl+ / Ctrl-) para evitar falsos positivos al hacer zoom en PDFs o clases
+      const currentDpr = window.devicePixelRatio || 1;
+      const zoomScale = currentDpr / baselineDpr;
+      const adjustedInnerWidth = window.innerWidth * zoomScale;
+      const adjustedInnerHeight = window.innerHeight * zoomScale;
+
       const threshold = 160;
-      if (window.outerHeight - window.innerHeight > threshold ||
-          window.outerWidth - window.innerWidth > threshold) {
+      const isOpen =
+        window.outerHeight - adjustedInnerHeight > threshold ||
+        window.outerWidth - adjustedInnerWidth > threshold;
+
+      if (isOpen && !devToolsWasOpen) {
+        devToolsWasOpen = true;
         console.clear();
         console.log('%cAcceso restringido detectado.', 'color: red; font-size: 20px; font-weight: bold;');
         showSecurityWarning('Herramientas de desarrollo detectadas. Funcionalidad restringida.');
+      } else if (!isOpen) {
+        devToolsWasOpen = false;
       }
     };
 
-    const interval = setInterval(detectDevTools, 1500);
+    // En dispositivos móviles/táctiles no existen DevTools acoplables y la barra del navegador dispara falsos positivos
+    const interval = mobileDevice ? null : setInterval(detectDevTools, 1500);
 
     const handleFullScreenChange = () => {
-      setIsFullScreen(!!document.fullscreenElement);
+      const nativeActive = Boolean(
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement ||
+        document.msFullscreenElement
+      );
+      setIsFullScreen(nativeActive || isCssFullScreenRef.current);
     };
     document.addEventListener('fullscreenchange', handleFullScreenChange);
     document.addEventListener('webkitfullscreenchange', handleFullScreenChange); // Safari
@@ -97,7 +178,7 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
       document.removeEventListener('keydown', disableKeyboardShortcuts);
       document.removeEventListener('selectstart', disableSelection);
       document.removeEventListener('dragstart', disableDragStart);
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
       document.removeEventListener('fullscreenchange', handleFullScreenChange);
       document.removeEventListener('webkitfullscreenchange', handleFullScreenChange);
       document.removeEventListener('mozfullscreenchange', handleFullScreenChange);
@@ -143,30 +224,57 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
     return `${mm}:${ss}`;
   };
 
+  const activateCssFullScreen = () => {
+    setIsCssFullScreen(true);
+    setIsFullScreen(true);
+  };
+
   const toggleFullScreen = () => {
     if (!containerRef.current) return;
 
-    if (!document.fullscreenElement && 
-        !document.mozFullScreenElement && // Firefox
-        !document.webkitFullscreenElement && // Chrome, Safari, Opera
-        !document.msFullscreenElement) { // IE/Edge
-      if (containerRef.current.requestFullscreen) {
-        containerRef.current.requestFullscreen().catch(err => console.error("Error full-screen:", err));
-      } else if (containerRef.current.mozRequestFullScreen) { // Firefox
-        containerRef.current.mozRequestFullScreen();
-      } else if (containerRef.current.webkitRequestFullscreen) { // Chrome, Safari, Opera
-        containerRef.current.webkitRequestFullscreen();
-      } else if (containerRef.current.msRequestFullscreen) { // IE/Edge
-        containerRef.current.msRequestFullscreen();
+    const nativeFullscreenEl =
+      document.fullscreenElement ||
+      document.mozFullScreenElement ||
+      document.webkitFullscreenElement ||
+      document.msFullscreenElement;
+
+    if (isCssFullScreen) {
+      setIsCssFullScreen(false);
+      setIsFullScreen(false);
+      return;
+    }
+
+    if (!nativeFullscreenEl) {
+      const el = containerRef.current;
+      // En iOS Safari el API Fullscreen para <div> no está soportado; usar fallback CSS seguro manteniendo la capa escudo z-30
+      const isIOS =
+        /iPhone|iPad|iPod/i.test(navigator.userAgent || '') ||
+        (/Macintosh/i.test(navigator.userAgent || '') && (navigator.maxTouchPoints || 0) > 1);
+
+      if (isIOS) {
+        activateCssFullScreen();
+        return;
+      }
+
+      if (el.requestFullscreen) {
+        el.requestFullscreen().catch(() => activateCssFullScreen());
+      } else if (el.mozRequestFullScreen) {
+        el.mozRequestFullScreen();
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+      } else if (el.msRequestFullscreen) {
+        el.msRequestFullscreen();
+      } else {
+        activateCssFullScreen();
       }
     } else {
       if (document.exitFullscreen) {
         document.exitFullscreen();
-      } else if (document.mozCancelFullScreen) { // Firefox
+      } else if (document.mozCancelFullScreen) {
         document.mozCancelFullScreen();
-      } else if (document.webkitExitFullscreen) { // Chrome, Safari, Opera
+      } else if (document.webkitExitFullscreen) {
         document.webkitExitFullscreen();
-      } else if (document.msExitFullscreen) { // IE/Edge
+      } else if (document.msExitFullscreen) {
         document.msExitFullscreen();
       }
     }
@@ -175,15 +283,24 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
   return (
     <div 
       ref={containerRef}
-      className="relative w-full h-full bg-black rounded-lg overflow-hidden group"
+      className={
+        isCssFullScreen
+          ? 'fixed inset-0 z-[9999] w-screen h-screen bg-black overflow-hidden group'
+          : 'relative isolate w-full h-full bg-black rounded-lg overflow-hidden group'
+      }
       style={{ 
-        userSelect: 'none', WebkitUserSelect: 'none', MozUserSelect: 'none', msUserSelect: 'none'
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
+        MozUserSelect: 'none',
+        msUserSelect: 'none',
+        WebkitTouchCallout: 'none'
       }}
     >
       <div 
         className="absolute inset-0 z-30"
-        style={{ cursor: 'default' }}
+        style={{ cursor: 'default', WebkitTouchCallout: 'none', userSelect: 'none' }}
         onContextMenu={(e) => e.preventDefault()}
+        onDragStart={(e) => e.preventDefault()}
         onClick={(e) => {
           if (playerRef.current && e.target === e.currentTarget) { 
             togglePlay();
@@ -193,16 +310,26 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
 
       <ReactPlayer
         ref={playerRef}
-        url={url}
+        url={normalizedUrl}
         width="100%"
         height="100%"
         playing={isPlaying}
         volume={volume}
         muted={muted}
+        playbackRate={playbackRate}
         onPlay={handlePlay}
         onPause={handlePause}
         onProgress={handleProgress}
         onDuration={handleDuration}
+        onError={(errCode) => {
+          setIsPlaying(false);
+          const isEmbedRestricted = errCode === 101 || errCode === 150 || errCode === 153;
+          setPlayerError(
+            isEmbedRestricted
+              ? 'El propietario de este video en YouTube deshabilitó su reproducción embebida fuera de YouTube.'
+              : 'No se pudo cargar este video de YouTube. Verifica el enlace o que el video permita inserción.'
+          );
+        }}
         controls={false}
         config={{
           youtube: {
@@ -226,7 +353,9 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
       />
 
       <div 
-        className="absolute bottom-0 left-0 right-0 z-40 bg-gradient-to-t from-black/70 via-black/50 to-transparent p-3 pt-5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+        className={`absolute bottom-0 left-0 right-0 z-40 bg-gradient-to-t from-black/70 via-black/50 to-transparent p-3 pt-5 transition-opacity duration-300 ${
+          !isPlaying || isCssFullScreen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+        }`}
       >
         <div 
           className="w-full h-1.5 bg-gray-700/70 rounded cursor-pointer mb-2.5 relative group/progress"
@@ -263,9 +392,46 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
             </button>
             <input type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume}
               onChange={(e) => { setVolume(parseFloat(e.target.value)); setMuted(false); }}
-              className="w-16 h-1 bg-gray-600/70 rounded-lg appearance-none cursor-pointer slider"
+              className="w-16 h-1 bg-gray-600/70 rounded-lg appearance-none cursor-pointer slider hidden sm:block"
               aria-label="Control de volumen"
             />
+            {/* Selector de velocidad de reproducción */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowSpeedMenu((prev) => !prev)}
+                className={`px-2 py-1 rounded-md text-xs font-semibold transition-colors ${
+                  playbackRate !== 1
+                    ? 'bg-red-600 text-white hover:bg-red-500'
+                    : 'bg-white/15 text-white hover:bg-white/25'
+                }`}
+                aria-label="Velocidad de reproducción"
+                title="Velocidad de reproducción"
+              >
+                {playbackRate}x
+              </button>
+              {showSpeedMenu && (
+                <div className="absolute bottom-9 right-0 bg-gray-900/95 border border-white/15 rounded-lg p-1 shadow-xl flex flex-col gap-0.5 min-w-[68px] z-50">
+                  {SPEED_OPTIONS.map((rate) => (
+                    <button
+                      key={rate}
+                      type="button"
+                      onClick={() => {
+                        setPlaybackRate(rate);
+                        setShowSpeedMenu(false);
+                      }}
+                      className={`px-2.5 py-1.5 rounded text-xs font-semibold text-center transition-colors ${
+                        playbackRate === rate
+                          ? 'bg-red-600 text-white'
+                          : 'text-gray-200 hover:bg-white/15'
+                      }`}
+                    >
+                      {rate}x
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             {/* Botón de Pantalla Completa */}
             <button onClick={toggleFullScreen} className="p-1.5 hover:bg-white/20 rounded-full transition-colors" aria-label={isFullScreen ? "Salir de pantalla completa" : "Pantalla completa"}>
               {isFullScreen ? (
@@ -288,6 +454,17 @@ const ProtectedVideoPlayer = ({ url, width = "100%", height = "100%", onProgress
         <h3 className="text-2xl font-bold mb-2">Acceso Restringido</h3>
         <p className="text-lg">Se ha detectado actividad sospechosa. La reproducción puede ser limitada.</p>
       </div>
+
+      {playerError && (
+        <div className="absolute inset-0 z-[35] bg-black/85 flex flex-col items-center justify-center text-white text-center p-6 pointer-events-none">
+          <p className="text-sm sm:text-base font-semibold text-amber-300 mb-1">
+            Video no disponible para inserción
+          </p>
+          <p className="text-xs sm:text-sm text-gray-300 max-w-md">
+            {playerError}
+          </p>
+        </div>
+      )}
 
       <style jsx>{`
         .slider::-webkit-slider-thumb {

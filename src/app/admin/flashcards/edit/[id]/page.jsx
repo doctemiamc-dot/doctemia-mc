@@ -1,7 +1,8 @@
 "use client";
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
-import { doc, getDoc, updateDoc, serverTimestamp, collection, getDocs } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { getCachedCategories, getCachedSubcategories } from '@/lib/catalogCache';
 import { useRouter, useParams } from 'next/navigation';
 import { useTheme } from '@/context/ThemeContext';
 import { formatDriveUrl } from '@/lib/driveUtils';
@@ -42,24 +43,16 @@ export default function EditFlashcardPage() {
   };
 
   useEffect(() => {
-    const fetchCategories = async () => {
+    if (!id) return;
+    let cancelled = false;
+    const loadCategoriesAndCard = async () => {
       try {
-        const querySnapshot = await getDocs(collection(db, 'course_categories'));
-        const categoriesData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        categoriesData.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        const [categoriesData, docSnap] = await Promise.all([
+          getCachedCategories(),
+          getDoc(doc(db, 'flashcards', id)),
+        ]);
+        if (cancelled) return;
         setCategories(categoriesData);
-      } catch (error) {
-        console.error("Error fetching categories:", error);
-      }
-    };
-    fetchCategories();
-  }, []);
-
-  useEffect(() => {
-    const fetchFlashcard = async () => {
-      try {
-        const docRef = doc(db, 'flashcards', id);
-        const docSnap = await getDoc(docRef);
 
         if (docSnap.exists()) {
           const data = docSnap.data();
@@ -71,9 +64,9 @@ export default function EditFlashcardPage() {
             especialidadNombre: data.especialidadNombre || '',
             subtema: data.subtema || '',
             tags: data.tags ? data.tags.join(', ') : '',
-            tipo: data.tipo || 'Pregunta-Respuesta'
+            tipo: data.tipo || 'Pregunta-Respuesta',
           });
-          
+
           const originalLink = data.driveUrl || '';
           setNewDriveLink(originalLink);
           setPreview(formatDriveUrl(originalLink));
@@ -83,28 +76,29 @@ export default function EditFlashcardPage() {
           }
         } else {
           Swal.fire({
-            icon: 'error', title: 'No encontrada', text: 'La tarjeta no existe.',
-            ...swalTheme
+            icon: 'error',
+            title: 'No encontrada',
+            text: 'La tarjeta no existe.',
+            ...swalTheme,
           });
           router.push('/admin/flashcards');
         }
       } catch (error) {
-        console.error("Error fetching flashcard:", error);
+        console.error('Error fetching flashcard:', error);
       } finally {
-        setFetching(false);
+        if (!cancelled) setFetching(false);
       }
     };
-
-    if (id && categories.length > 0) fetchFlashcard();
-  }, [id, categories, router]);
+    loadCategoriesAndCard();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, router]);
 
   const fetchSubthemes = async (catId, currentSubtema = '') => {
     setLoadingSubthemes(true);
     try {
-      const subRef = collection(db, 'course_categories', catId, 'subcategories');
-      const querySnapshot = await getDocs(subRef);
-      const subData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      subData.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      const subData = await getCachedSubcategories(catId);
       setSubthemes(subData);
       
       // Si el subtema actual no está en la nueva lista, seleccionar el primero o vaciarlo

@@ -1,10 +1,13 @@
 'use client';
 
+import NavbarProfileAvatar from './NavbarProfileAvatar';
+
 import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { useTheme } from '@/context/ThemeContext';
+import { usePwaInstall } from '@/app/components/pwa/PwaSupport';
 // --- ✅ MEJORA: Se importa el icono ChevronDown para el desplegable ---
 import {
   Home,
@@ -20,17 +23,41 @@ import {
   Moon,
   BookmarkCheck,
   ChevronDown,
-  BookMarked
+  BookMarked,
+  FolderOpen,
+  Download,
+  Loader2
 } from 'lucide-react';
 
 export default function NavbarUser({ children }) {
   const { user, signOut } = useAuth();
   const { isDark, toggleTheme, isLoaded } = useTheme();
+  const { canInstall, isStandalone, triggerInstall } = usePwaInstall();
   const pathname = usePathname();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [pendingHref, setPendingHref] = useState(null);
   // --- ✅ MEJORA: Estado para controlar el menú desplegable ---
   const [openDropdown, setOpenDropdown] = useState(null);
+
+  useEffect(() => {
+    setPendingHref(null);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!pendingHref) return undefined;
+    const timer = setTimeout(() => setPendingHref(null), 8000);
+    return () => clearTimeout(timer);
+  }, [pendingHref]);
+
+  const handleNavClick = (href) => {
+    if (href && href !== pathname) {
+      setPendingHref(href);
+    }
+    if (isMobile) {
+      setIsSidebarOpen(false);
+    }
+  };
 
   // --- ✅ MEJORA: Estructura de navegación con sub-menús ---
   const navItems = useMemo(() => [
@@ -55,6 +82,7 @@ export default function NavbarUser({ children }) {
     /* Se modifico el nombre de la carpeta coursesPagoUnico a pagoUnicoCourses
     no puede comenzar dos carpetas con la misma palabra porque se van a activar las dos en el sidebar*/
     { href: '/app/pagoUnicoCourses', label: 'Cursos', Icon: BookMarked },
+    { href: '/app/materiales', label: 'Materiales', Icon: FolderOpen },
     { type: 'separator', label: 'Herramientas' },
     { href: '/app/flashcards', label: 'Tarjetas de Estudio', Icon: Star },
     { href: '/app/examen-test', label: 'Exámenes', Icon: FileText },
@@ -91,34 +119,41 @@ export default function NavbarUser({ children }) {
     setOpenDropdown(openDropdown === label ? null : label);
   };
 
-  // --- ✅ MEJORA: Nueva paleta de colores personalizada ---
-  // Paleta de colores: #014ba0, #FFF9F0, #24B0BA, #F0F2F2, #2E4A70, #CF8A40
+  // --- ✅ MEJORA: Paleta Midnight Clinical con separación arquitectónica chrome/canvas ---
   const headerBg = isDark 
-    ? 'text-white border-gray-700' 
+    ? 'text-[#F1F5F9] border-slate-400/20' 
     : 'text-gray-900 border-gray-200';
   
   const sidebarBg = isDark 
-    ? 'border-gray-700' 
+    ? 'border-slate-400/25' 
     : 'border-gray-200';
   
   const mainBg = isDark 
-    ? 'bg-gray-900 text-gray-100' 
+    ? 'bg-[#060A13] text-slate-100' 
     : 'text-gray-900';
 
 
   // Estilos dinámicos para el header con la nueva paleta
   const headerStyle = isDark
-    ? { backgroundColor: '#2E4A70' } // Azul oscuro para modo oscuro
-    : { backgroundColor: '#FFFFFF' }; // Azul claro para modo claro
+    ? {
+        backgroundColor: '#121E34',
+        borderBottomColor: 'rgba(148, 163, 184, 0.22)',
+        boxShadow: '0 4px 24px rgba(0, 0, 0, 0.50), inset 0 -1px 0 rgba(56, 214, 224, 0.08)',
+      }
+    : { backgroundColor: '#FFFFFF' }; // Blanco para modo claro
 
   // Estilos dinámicos para el sidebar con la nueva paleta
   const sidebarStyle = isDark
-    ? { backgroundColor: '#2E4A70' } // Azul oscuro para modo oscuro
+    ? {
+        backgroundColor: '#121E34',
+        borderRightColor: 'rgba(148, 163, 184, 0.24)',
+        boxShadow: '8px 0 32px rgba(0, 0, 0, 0.55), inset -1px 0 0 rgba(56, 214, 224, 0.10)',
+      }
     : { backgroundColor: '#FFF9F0' }; // Crema para modo claro
 
   // Estilos dinámicos para el main con el fondo especificado
   const mainStyle = isDark
-    ? { backgroundColor: '#2E4A70' } // Azul oscuro para modo oscuro
+    ? { backgroundColor: '#060A13' } // Canvas abisal para contrastar con el sidebar
     : { backgroundColor: '#FFF9F0' }; // Crema para modo claro (fondo solicitado)
 
   if (!isLoaded) {
@@ -131,10 +166,10 @@ export default function NavbarUser({ children }) {
 
   return (
     <>
-      {isMobile && isSidebarOpen && <div className="fixed inset-0 bg-black/60 z-30" onClick={toggleSidebar}></div>}
+      {isMobile && isSidebarOpen && <div className="fixed inset-0 bg-black/60 z-[60]" onClick={toggleSidebar}></div>}
 
       <header 
-        className={`fixed top-0 left-0 w-full flex justify-between items-center px-4 py-3 border-b z-40 shadow-sm transition-colors ${headerBg}`}
+        className={`fixed top-0 left-0 w-full flex justify-between items-center px-4 py-3 border-b z-[70] shadow-sm transition-colors ${headerBg}`}
         style={headerStyle}
       >
         <div className="flex items-center gap-4">
@@ -149,20 +184,23 @@ export default function NavbarUser({ children }) {
         <div className="flex items-center gap-4">
           <button 
             onClick={toggleTheme} 
-            className={`p-2 rounded-lg transition-all hover:bg-white/10`}
-            style={{ backgroundColor: isDark ? '#3b8eed' : '#F0F2F2' }}
+            className={`p-2 rounded-lg transition-all ${isDark ? 'hover:bg-[#253A5E]' : 'hover:bg-white/10'}`}
+            style={{
+              backgroundColor: isDark ? 'rgba(28, 44, 71, 0.95)' : '#F0F2F2',
+              border: isDark ? '1px solid rgba(148, 163, 184, 0.24)' : 'none',
+            }}
           >
-            {isDark ? <Sun className="w-5 h-5 text-yellow-400" /> : <Moon className="w-5 h-5 text-gray-700" />}
+            {isDark ? <Sun className="w-5 h-5 text-amber-300" /> : <Moon className="w-5 h-5 text-gray-700" />}
           </button>
           {user && (
             <>
-              <Link href="/app/profile" className="hidden sm:block">
-                <img 
-                  src={user.photoURL || '/icons/user.png'} 
-                  alt="user" 
-                  className={`w-9 h-9 rounded-full border-2 transition-all hover:border-opacity-80`}
-                  style={{ borderColor: isDark ? '#000000ff' : '#000000ff' }}
-                />
+              <Link
+                href="/app/profile"
+                aria-label="Ir a mi perfil"
+                title="Mi Perfil"
+                className="group hidden sm:inline-flex items-center justify-center rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-[#24B0BA]"
+              >
+                <NavbarProfileAvatar isDark={isDark} sizeClass="w-9 h-9" pixelSize={36} alt="" />
               </Link>
               <button 
                 onClick={signOut} 
@@ -175,7 +213,7 @@ export default function NavbarUser({ children }) {
               <button 
                 onClick={signOut} 
                 className={`sm:hidden p-2 rounded-lg transition-all hover:opacity-90 text-white`}
-                style={{ backgroundColor: '#030303ff' }}
+                style={{ backgroundColor: isDark ? '#d8220aff' : '#030303ff' }}
               >
                 <LogOut className="w-5 h-5" />
               </button>
@@ -185,11 +223,11 @@ export default function NavbarUser({ children }) {
       </header>
 
       <aside 
-        className={`fixed top-0 left-0 h-full pt-16 border-r shadow-lg transition-transform duration-300 ease-in-out ${sidebarBg}`} 
+        className={`fixed top-0 left-0 h-full pt-16 border-r shadow-lg transition-transform duration-300 ease-in-out flex flex-col ${sidebarBg}`} 
         style={{ 
           transform: isSidebarOpen ? 'translateX(0)' : 'translateX(-100%)', 
           width: '16rem', 
-          zIndex: 35,
+          zIndex: 65,
           ...sidebarStyle
         }}
       >
@@ -201,7 +239,7 @@ export default function NavbarUser({ children }) {
                   <li key={index} className="px-4 pt-6 pb-2">
                     <span 
                       className={`text-[10px] font-black uppercase tracking-[0.15em] opacity-60 ${
-                        isDark ? 'text-blue-300' : 'text-[#2E4A70]'
+                        isDark ? 'text-[#8FA2BC]' : 'text-[#2E4A70]'
                       }`}
                     >
                       {item.label}
@@ -221,8 +259,8 @@ export default function NavbarUser({ children }) {
                       onClick={() => handleDropdownClick(item.label)} 
                       className={`w-full flex items-center justify-between gap-4 px-3 py-2.5 rounded-xl transition-all duration-200 group ${
                         isParentActive && !isOpen 
-                          ? (isDark ? 'bg-[#24B0BA] text-[#FFF9F0]' : 'bg-[#014ba0] text-white')
-                          : (isDark ? 'text-[#FFF9F0] hover:bg-[#24B0BA]/10' : 'text-[#2E4A70] hover:bg-[#F0F2F2]')
+                          ? (isDark ? 'bg-[#24B0BA]/15 text-[#38D6E0] border border-[#24B0BA]/35' : 'bg-[#014ba0] text-white')
+                          : (isDark ? 'text-slate-200 hover:bg-white/[0.06] hover:text-white' : 'text-[#2E4A70] hover:bg-[#F0F2F2]')
                       }`}
                     >
                       <div className="flex items-center gap-4">
@@ -234,19 +272,22 @@ export default function NavbarUser({ children }) {
                     {isOpen && (
                       <ul className="pl-6 mt-1 space-y-1">
                         {item.subItems.map(subItem => {
-                          const active = pathname.startsWith(subItem.href);
+                          const isPendingSub = pendingHref === subItem.href && pathname !== subItem.href;
+                          const active = isPendingSub || pathname.startsWith(subItem.href);
                           return (
                             <li key={subItem.href}>
                               <Link 
                                 href={subItem.href} 
+                                onClick={() => handleNavClick(subItem.href)}
                                 className={`flex items-center gap-4 px-3 py-2 rounded-xl transition-all duration-200 text-sm group ${
                                   active 
-                                    ? (isDark ? 'bg-[#24B0BA] text-[#FFF9F0]' : 'bg-[#014ba0] text-white shadow-md')
-                                    : (isDark ? 'text-[#F0F2F2] hover:bg-[#24B0BA]/10' : 'text-[#2E4A70] hover:bg-[#F0F2F2]')
+                                    ? (isDark ? 'bg-[#24B0BA]/15 text-[#38D6E0] border border-[#24B0BA]/35' : 'bg-[#014ba0] text-white shadow-md')
+                                    : (isDark ? 'text-slate-300 hover:bg-white/[0.06] hover:text-white' : 'text-[#2E4A70] hover:bg-[#F0F2F2]')
                                 }`}
                               >
                                 <subItem.Icon className={`w-4 h-4 flex-shrink-0 transition-transform duration-200 group-hover:scale-110`} />
                                 <span className="truncate font-semibold">{subItem.label}</span>
+                                {isPendingSub && <Loader2 className="w-3.5 h-3.5 ml-auto animate-spin shrink-0 opacity-80" />}
                               </Link>
                             </li>
                           );
@@ -257,26 +298,46 @@ export default function NavbarUser({ children }) {
                 );
               }
 
-              const active = pathname === item.href || (item.href !== '/app' && pathname.startsWith(item.href));
+              const isPending = pendingHref === item.href && pathname !== item.href;
+              const active = isPending || pathname === item.href || (item.href !== '/app' && pathname.startsWith(item.href));
               
               return (
                 <li key={`${item.href}-${item.label}`}>
                   <Link 
                     href={item.href} 
+                    onClick={() => handleNavClick(item.href)}
                     className={`flex items-center gap-4 px-4 py-3 rounded-xl transition-all duration-200 group ${
                       active 
-                        ? (isDark ? 'bg-[#24B0BA] text-white shadow-md' : 'bg-[#014ba0] text-white shadow-md')
-                        : (isDark ? 'text-[#FFF9F0] hover:bg-white/10' : 'text-[#2E4A70] hover:bg-[#F0F2F2]')
+                        ? (isDark ? 'bg-[#24B0BA]/15 text-[#38D6E0] border border-[#24B0BA]/35 shadow-sm' : 'bg-[#014ba0] text-white shadow-md')
+                        : (isDark ? 'text-slate-200 hover:bg-white/[0.06] hover:text-white' : 'text-[#2E4A70] hover:bg-[#F0F2F2]')
                     }`}
                   >
                     <item.Icon className={`w-5 h-5 flex-shrink-0 transition-transform duration-200 ${active ? 'scale-110' : 'group-hover:scale-110'}`} />
                     <span className="truncate font-bold tracking-tight">{item.label}</span>
+                    {isPending && <Loader2 className="w-4 h-4 ml-auto animate-spin shrink-0 opacity-80" />}
                   </Link>
                 </li>
               );
             })}
           </ul>
         </nav>
+
+        {canInstall && !isStandalone && (
+          <div className={`p-3 border-t ${isDark ? 'border-white/10' : 'border-[#2E4A70]/10'}`}>
+            <button
+              type="button"
+              onClick={triggerInstall}
+              className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                isDark
+                  ? 'bg-[#24B0BA] hover:bg-[#2fc4ce] text-[#051B20]'
+                  : 'bg-[#014ba0] hover:bg-[#013b80] text-white'
+              }`}
+            >
+              <Download className="w-4 h-4 flex-shrink-0" />
+              <span>Instalar app DOCTEMIA MC</span>
+            </button>
+          </div>
+        )}
       </aside>
 
       <main 

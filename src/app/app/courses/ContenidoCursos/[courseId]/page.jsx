@@ -59,11 +59,9 @@ export default function ContenidoCursoPage() {
     };
     document.addEventListener('keydown', handleKeyDown);
     document.addEventListener('contextmenu', handleContextMenu);
-    const devToolsInterval = setInterval(detectDevTools, 1000);
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
       document.removeEventListener('contextmenu', handleContextMenu);
-      clearInterval(devToolsInterval);
     };
   }, []);
 
@@ -89,18 +87,12 @@ export default function ContenidoCursoPage() {
         setLoading(true);
         setError(null);
         try {
-          const userDocRef = doc(db, 'users', user.uid);
-          const userDocSnap = await getDoc(userDocRef);
-          if (userDocSnap.exists()) {
-            const userData = userDocSnap.data();
-            const isCoursePaid = userData.cursosPagados?.some(c => c.idCurso === courseId);
-            if (!isCoursePaid) {
-              Swal.fire('Acceso Denegado', 'No tienes este curso activo o ya lo has completado.', 'warning');
-              router.push('/app/courses/cursosPagados');
-              return;
-            }
-          } else {
-            throw new Error("No se encontró el documento del usuario.");
+          // Reutilizar user.cursosPagados desde AuthContext (0 lecturas extra a users/{uid})
+          const isCoursePaid = user.cursosPagados?.some(c => c.idCurso === courseId);
+          if (!isCoursePaid) {
+            Swal.fire('Acceso Denegado', 'No tienes este curso activo o ya lo has completado.', 'warning');
+            router.push('/app/courses/cursosPagados');
+            return;
           }
           const courseDocRef = doc(db, 'courses', courseId);
           const courseDocSnap = await getDoc(courseDocRef);

@@ -1,6 +1,8 @@
 // src/app/api/delete-user/route.js
 import { NextResponse } from 'next/server';
 import { auth, db } from '@/lib/firebase-admin';
+import { invalidateUserAuthCache } from '@/lib/apiAuth';
+import { invalidateUsersSearchCache } from '@/lib/usersSearchCache';
 
 export async function DELETE(req) {
   try {
@@ -14,12 +16,15 @@ export async function DELETE(req) {
         try {
           await auth.deleteUser(id);
           await db.collection('users').doc(id).delete();
+          invalidateUserAuthCache(id);
           results.success.push(id);
         } catch (err) {
           console.error(`Error eliminando usuario ${id}:`, err);
           results.failed.push({ id, error: err.message });
         }
       }
+
+      if (results.success.length > 0) invalidateUsersSearchCache();
 
       return NextResponse.json({ 
         message: `Proceso completado. Eliminados: ${results.success.length}, Fallidos: ${results.failed.length}`,
@@ -34,6 +39,8 @@ export async function DELETE(req) {
 
     await auth.deleteUser(userId);
     await db.collection('users').doc(userId).delete();
+    invalidateUserAuthCache(userId);
+    invalidateUsersSearchCache();
 
     return NextResponse.json({ message: 'Usuario eliminado con éxito' });
 

@@ -3,6 +3,7 @@ const path = require('path');
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  allowedDevOrigins: ['192.168.56.1', '192.168.0.5', '192.168.0.17', 'localhost', '127.0.0.1'],
   // Configuración de Turbopack para Next.js 16+
   turbopack: {
     root: __dirname, // <-- AQUÍ ESTÁ LA MAGIA: Forzamos la raíz del proyecto
@@ -32,6 +33,36 @@ const nextConfig = {
     // pero lo mantenemos para compatibilidad si es necesario.
     config.resolve.alias['@'] = path.resolve(__dirname, 'src');
     return config;
+  },
+  async headers() {
+    return [
+      {
+        source: '/sw.js',
+        headers: [
+          {
+            key: 'Content-Type',
+            value: 'application/javascript; charset=utf-8',
+          },
+          {
+            key: 'Cache-Control',
+            value: 'no-cache, no-store, must-revalidate',
+          },
+          {
+            key: 'Content-Security-Policy',
+            value: "default-src 'self'; script-src 'self'",
+          },
+        ],
+      },
+      {
+        source: '/manifest.webmanifest',
+        headers: [
+          {
+            key: 'Content-Type',
+            value: 'application/manifest+json; charset=utf-8',
+          },
+        ],
+      },
+    ];
   },
 };
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth } from '../../lib/firebase'; // Asegúrate que la ruta sea correcta
@@ -13,6 +13,22 @@ export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('expired') === '1') {
+      Swal.fire({
+        title: 'Vigencia Vencida',
+        text: 'Tu periodo activo ha vencido. Contacta al administrador para renovar tu acceso.',
+        icon: 'warning',
+        background: '#C1E8FF',
+        color: '#021024',
+        confirmButtonText: 'Entendido',
+        confirmButtonColor: '#052659',
+      });
+    }
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -35,19 +51,23 @@ export default function LoginPage() {
         throw new Error(data.error || 'Error en el servidor durante el login');
       }
 
-      // --- IMPLEMENTACIÓN DE SWEETALERT2 PARA CONFIRMACIÓN ---
-      await Swal.fire({
+      try {
+        window.sessionStorage.setItem('__doctemia_synced_id_token', idToken);
+      } catch {
+        // Ignorar errores de sessionStorage
+      }
+
+      // Aviso no bloqueante para redirección instantánea
+      Swal.fire({
         title: '¡Inicio de sesión exitoso!',
-        text: 'Serás redirigido en breve.',
         icon: 'success',
-        timer: 2000, // La alerta se cierra automáticamente después de 2 segundos
+        toast: true,
+        position: 'top-end',
+        timer: 1800,
         timerProgressBar: true,
         background: '#C1E8FF',
         color: '#021024',
-        showConfirmButton: false, // Oculta el botón de confirmación
-        customClass: {
-          popup: 'rounded-2xl border border-gray-300',
-        }
+        showConfirmButton: false,
       });
 
       router.replace(data.role === 'admin' ? '/admin' : '/app');

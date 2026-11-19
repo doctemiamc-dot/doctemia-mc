@@ -1,6 +1,7 @@
 // src/app/api/login/route.js
 import { NextResponse } from 'next/server';
 import { auth as adminAuth, db } from '@/lib/firebase-admin';
+import { isAccountExpired } from '@/lib/accountExpiration';
 
 export async function POST(request) {
   try {
@@ -32,8 +33,24 @@ export async function POST(request) {
 
       const userData = userDocSnap.data();
       if (userData.active !== true) {
-        return NextResponse.json({ error: 'Cuenta inactiva' }, { status: 403 });
+        const msg = userData.deactivatedReason === 'expired'
+          ? 'Tu periodo activo ha vencido. Contacta al administrador para renovar tu acceso.'
+          : 'Cuenta inactiva';
+        return NextResponse.json({ error: msg }, { status: 403 });
       }
+
+      if (isAccountExpired(userData)) {
+        await userDocRef.update({
+          active: false,
+          expiredAt: new Date().toISOString(),
+          deactivatedReason: 'expired',
+        });
+        return NextResponse.json(
+          { error: 'Tu periodo activo ha vencido. Contacta al administrador para renovar tu acceso.' },
+          { status: 403 }
+        );
+      }
+
       role = decodedToken.role || userData.rol || 'user';
     }
 

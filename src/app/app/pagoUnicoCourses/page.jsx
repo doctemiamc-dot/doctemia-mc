@@ -2,28 +2,48 @@
 'use client';
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../../../lib/firebase';
-import { collection, getDocs, query, where, doc, getDoc, onSnapshot, addDoc, serverTimestamp, updateDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { collection, doc, addDoc, serverTimestamp, updateDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { useAuth } from '../../../context/AuthContext';
 import { useTheme } from '../../../context/ThemeContext';
+import {
+  getCachedCategories,
+  getCachedPagoUnicoCourses,
+  getCachedCourseMaterials,
+  getCachedContactInfo,
+  getCachedPendingAccessRequest,
+  setCachedPendingAccessRequest,
+} from '@/lib/catalogCache';
+import { countValidCourseVideos } from '@/lib/courseCurriculum';
 import Swal from 'sweetalert2';
-import { LockKeyhole, Send, Hourglass, BookOpen, Search, CheckCircle2, Bookmark, Filter, Grid3X3, List } from 'lucide-react';
+import { LockKeyhole, Send, Hourglass, BookOpen, Search, CheckCircle2, Bookmark, Filter, Grid3X3, List, Layers, PlayCircle, FileText, Loader2 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import Image from 'next/image';
 
 const NOMBRE_NEGOCIO = 'DOCTEMIA MC';
 
-const convertGoogleDriveUrl = (url) => {
-  if (!url) return '/placeholder.png';
-  if (url.includes('drive.google.com/uc?') || url.includes('drive.google.com/thumbnail?')) {
-    return url;
+const extractDriveFileId = (url) => {
+  if (!url || typeof url !== 'string') return '';
+  const trimmed = url.trim();
+  const pathMatch = trimmed.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (pathMatch) return pathMatch[1];
+  const queryMatch = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (queryMatch) return queryMatch[1];
+  return '';
+};
+
+const resolveCourseCoverUrl = (url, useFallback = false) => {
+  if (!url || typeof url !== 'string') return '';
+  const trimmed = url.trim();
+  if (!trimmed) return '';
+  if (trimmed.includes('drive.google.com') || trimmed.includes('lh3.googleusercontent.com')) {
+    const fileId = extractDriveFileId(trimmed);
+    if (fileId) {
+      return useFallback
+        ? `https://drive.google.com/uc?export=view&id=${fileId}`
+        : `https://drive.google.com/thumbnail?id=${fileId}&sz=w800`;
+    }
   }
-  const fileIdMatch = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
-  if (fileIdMatch) {
-    const fileId = fileIdMatch[1];
-    return `https://drive.google.com/thumbnail?id=${fileId}&sz=w500`;
-  }
-  return url;
+  return trimmed;
 };
 
 // Componente de Pantalla de Acceso Denegado
@@ -36,21 +56,17 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
     
     useEffect(() => {
         const checkRequestAndLoadInfo = async () => {
-            if (user) {
-                const q = query(collection(db, "pagoUnico_solicitudes"), where("userId", "==", user.uid), where("status", "==", "pendiente"));
-                const querySnapshot = await getDocs(q);
-                if (!querySnapshot.empty) {
-                    setRequestSent(true);
-                }
-            }
-            const contactInfoRef = doc(db, 'pags', 'infoContacto');
-            const docSnap = await getDoc(contactInfoRef);
-            if (docSnap.exists()) {
-                setContactInfo(docSnap.data());
+            if (user?.uid) {
+                const [hasPending, info] = await Promise.all([
+                    getCachedPendingAccessRequest(user.uid),
+                    getCachedContactInfo(),
+                ]);
+                if (hasPending) setRequestSent(true);
+                if (info) setContactInfo(info);
             }
         };
         checkRequestAndLoadInfo();
-    }, [user]);
+    }, [user?.uid]);
 
     const handleRequestAccessPopup = () => {
         setShowModal(true);
@@ -79,6 +95,7 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
                 type: 'pago_unico_access' 
             });
             setRequestSent(true);
+            setCachedPendingAccessRequest(user.uid, true);
             setShowModal(false);
             Swal.fire({ 
                 title: '¡Solicitud Enviada!', 
@@ -113,7 +130,7 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
 
                 <div className="space-y-4">
                     {requestSent ? (
-                        <div className="flex items-center justify-center gap-3 p-4 bg-amber-100 rounded-lg border-l-4 border-amber-400">
+                        <div className="flex items-center justify-center gap-3 p-4 bg-amber-50 rounded-xl border border-amber-300">
                             <Hourglass className="h-6 w-6 text-amber-600 animate-spin" />
                             <span className="font-semibold text-amber-800">Tu solicitud está en proceso</span>
                         </div>
@@ -144,7 +161,7 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-50 backdrop-blur-sm">
                     <div className="relative w-full max-w-md bg-white rounded-2xl shadow-2xl transform scale-100 transition-all duration-300">
                         <div className="flex items-center justify-between p-6 border-b border-gray-200">
-                            <h3 className="text-2xl font-bold bg-gradient-to-r from-teal-600 to-blue-600 bg-clip-text text-transparent">
+                            <h3 className="text-2xl font-extrabold text-[#014ba0]">
                                 ¡Obtén tu Acceso!
                             </h3>
                             <button 
@@ -173,6 +190,7 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
                                                 return contactInfo.qrUrl;
                                             })()} 
                                             alt="Código QR de Pago" 
+                                            referrerPolicy={contactInfo.qrUrl?.startsWith('http') ? 'no-referrer' : undefined}
                                             className="w-full h-full object-cover"
                                         />
                                     </div>
@@ -239,73 +257,366 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
     );
 };
 
-// Componente de Tarjeta de Curso
-const CourseCard = ({ course, isCompleted, onToggleComplete, onViewContent }) => (
-    <div className="group bg-white rounded-2xl shadow-lg hover:shadow-2xl transition-all duration-500 overflow-hidden transform hover:-translate-y-2">
-        <div className="relative overflow-hidden">
-            <div className="aspect-video w-full bg-gradient-to-br from-gray-100 to-gray-200">
-                <Image 
-                    src={convertGoogleDriveUrl(course.imageUrl)}
-                    alt={course.title} 
-                    width={400}
-                    height={250}
-                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                    unoptimized={course.imageUrl?.includes('drive.google.com')}
-                />
-            </div>
-            
-            {/* Badge de completado */}
-            {isCompleted && (
-                <div className="absolute top-3 right-3 bg-gradient-to-r from-teal-500 to-blue-600 text-white rounded-full p-2.5 shadow-lg animate-pulse">
-                    <CheckCircle2 size={20} />
+// Componente de Tarjeta de Curso (Cuadrícula y Lista; si no hay imagen, no muestra caja vacía/negra)
+const CourseCard = ({
+  course,
+  categoryName = '',
+  isCompleted,
+  isOpening = false,
+  isToggling = false,
+  onToggleComplete,
+  onViewContent,
+  onPrefetchCourse,
+  isDark = false,
+  layout = 'grid',
+}) => {
+  const [imgError, setImgError] = useState(false);
+  const [useDriveFallback, setUseDriveFallback] = useState(false);
+  const [coverShape, setCoverShape] = useState('standard');
+  const coverUrl = resolveCourseCoverUrl(course.imageUrl, useDriveFallback);
+  const fallbackCoverUrl = resolveCourseCoverUrl(course.imageUrl, true);
+
+  useEffect(() => {
+    setImgError(false);
+    setUseDriveFallback(false);
+    setCoverShape('standard');
+  }, [course.imageUrl]);
+
+  const handleImageError = () => {
+    if (!useDriveFallback && fallbackCoverUrl && fallbackCoverUrl !== coverUrl) {
+      setUseDriveFallback(true);
+      return;
+    }
+    setImgError(true);
+  };
+
+  const handleImageLoad = (e) => {
+    const { naturalWidth, naturalHeight } = e.currentTarget;
+    if (!naturalWidth || !naturalHeight) return;
+    if (naturalHeight > naturalWidth * 1.05) {
+      setCoverShape('portrait');
+    } else if (naturalWidth > naturalHeight * 1.35) {
+      setCoverShape('landscape');
+    } else {
+      setCoverShape('standard');
+    }
+  };
+
+  const isPortraitCover = coverShape === 'portrait';
+  const isWideLandscape = coverShape === 'landscape';
+
+  const showCover = Boolean(coverUrl && !imgError);
+  const mods = Array.isArray(course.modules) ? course.modules : [];
+  const moduleCount = mods.length;
+  const videoCount = countValidCourseVideos(course);
+
+  const cardSurface = isDark
+    ? 'bg-[#1e293b] border-white/10 text-white hover:border-[#24B0BA]/55'
+    : 'bg-white border-[#2E4A70]/15 text-[#1a2639] hover:border-[#014ba0]/45';
+
+  const mutedText = isDark ? 'text-slate-300' : 'text-[#2E4A70]';
+  const categoryBadgeClass = isDark
+    ? 'bg-[#24B0BA]/15 text-[#24B0BA]'
+    : 'bg-[#014ba0]/10 text-[#014ba0]';
+  const coverSurfaceClass = isDark ? 'bg-[#162235]' : 'bg-[#FAF5EB]';
+
+  if (layout === 'list') {
+    const listCoverHeightClass = isWideLandscape
+      ? 'h-52 sm:h-52 md:h-56'
+      : 'h-56 sm:h-72 md:h-[300px] lg:h-[320px]';
+
+    return (
+      <article className={`rounded-2xl border overflow-hidden transition-colors ${cardSurface}`}>
+        <div className="flex flex-col sm:flex-row sm:items-stretch">
+          {showCover && (
+            <div
+              className={`w-full sm:w-56 md:w-64 lg:w-72 ${listCoverHeightClass} relative shrink-0 overflow-hidden border-b sm:border-b-0 sm:border-r ${
+                isDark ? 'border-white/10' : 'border-[#2E4A70]/10'
+              } ${coverSurfaceClass}`}
+            >
+              <img
+                src={coverUrl}
+                alt={course.title || 'Portada del curso'}
+                loading="lazy"
+                referrerPolicy={coverUrl.startsWith('http') ? 'no-referrer' : undefined}
+                onLoad={handleImageLoad}
+                onError={handleImageError}
+                className="w-full h-full object-cover object-center"
+              />
+              {isCompleted && (
+                <div className="absolute top-3 right-3 bg-emerald-600 text-white rounded-full p-1.5">
+                  <CheckCircle2 size={16} />
                 </div>
-            )}
-            
-            {/* Overlay para cursos completados */}
-            {isCompleted && (
-                <div className="absolute inset-0 bg-gradient-to-t from-teal-900/50 to-transparent"></div>
-            )}
-        </div>
-
-        <div className="p-6 flex flex-col">
-            <h4 className="text-xl font-bold text-gray-800 mb-3 line-clamp-2 group-hover:text-teal-600 transition-colors">
-                {course.title}
-            </h4>
-            
-            <p className="text-gray-600 text-sm mb-6 line-clamp-3 flex-grow leading-relaxed">
-                {course.description}
-            </p>
-
-            <div className="space-y-3 mt-auto">
-                <button 
-                    onClick={() => onToggleComplete(course.id, isCompleted)} 
-                    className={`w-full inline-flex items-center justify-center gap-2 font-semibold py-3 px-4 rounded-xl transition-all duration-300 ${
-                        isCompleted 
-                            ? 'bg-gradient-to-r from-teal-100 to-blue-100 text-teal-700 hover:from-teal-200 hover:to-blue-200' 
-                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                >
-                    {isCompleted ? 
-                        <><CheckCircle2 size={18} /> Curso Completado</> : 
-                        <><Bookmark size={18} /> Marcar como Completado</>
-                    }
-                </button>
-                
-                <button 
-                    onClick={() => onViewContent(course.id)} 
-                    className="w-full inline-flex items-center justify-center gap-2 bg-gradient-to-r from-teal-500 to-blue-600 text-white font-bold py-3 px-4 rounded-xl hover:from-teal-600 hover:to-blue-700 transition-all duration-300 shadow-lg hover:shadow-xl"
-                >
-                    <BookOpen size={20} /> 
-                    Ver Contenido
-                </button>
+              )}
             </div>
+          )}
+
+          <div className="flex-1 min-w-0 p-5 sm:p-6 flex flex-col justify-between gap-4">
+            <div className="space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className={`flex flex-wrap items-center gap-2 text-xs font-bold ${mutedText}`}>
+                  {!showCover && (
+                    <span
+                      className={`inline-flex items-center justify-center w-7 h-7 rounded-lg ${categoryBadgeClass}`}
+                    >
+                      <BookOpen className="w-3.5 h-3.5" />
+                    </span>
+                  )}
+                  {categoryName && (
+                    <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${categoryBadgeClass}`}>
+                      {categoryName}
+                    </span>
+                  )}
+                  <span className="inline-flex items-center gap-1 tabular-nums">
+                    <Layers className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {moduleCount} {moduleCount === 1 ? 'módulo' : 'módulos'}
+                    </span>
+                  </span>
+                  {videoCount > 0 ? (
+                    <span className="inline-flex items-center gap-1 tabular-nums">
+                      <PlayCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {videoCount} {videoCount === 1 ? 'clase' : 'clases'}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1">
+                      <FileText className="w-3.5 h-3.5 shrink-0" />
+                      <span>PDFs / Diapositivas</span>
+                    </span>
+                  )}
+                </div>
+
+                {!showCover && isCompleted && (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-extrabold px-2.5 py-0.5 rounded-full bg-emerald-600 text-white">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Completado</span>
+                  </span>
+                )}
+              </div>
+
+              <h4 className="text-lg sm:text-xl font-extrabold leading-snug line-clamp-2">
+                {course.title}
+              </h4>
+
+              {course.description && (
+                <p className={`text-sm leading-relaxed line-clamp-4 ${mutedText}`}>
+                  {course.description}
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 pt-1">
+              <button
+                type="button"
+                disabled={isToggling}
+                onClick={() => onToggleComplete(course.id, isCompleted)}
+                className={`w-full inline-flex items-center justify-center gap-2 font-bold text-xs sm:text-sm py-2.5 px-4 rounded-xl cursor-pointer transition-colors disabled:opacity-75 disabled:cursor-wait ${
+                  isCompleted
+                    ? isDark
+                      ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30'
+                      : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200'
+                    : isDark
+                    ? 'bg-white/10 text-blue-100 hover:bg-white/15'
+                    : 'bg-[#F0F2F2] text-[#2E4A70] hover:bg-slate-200/80'
+                }`}
+              >
+                {isToggling ? (
+                  <>
+                    <Loader2 size={17} className="animate-spin" />
+                    <span>{isCompleted ? 'Completado' : 'Guardando...'}</span>
+                  </>
+                ) : isCompleted ? (
+                  <>
+                    <CheckCircle2 size={17} />
+                    <span>Completado</span>
+                  </>
+                ) : (
+                  <>
+                    <Bookmark size={17} />
+                    <span>Marcar Completado</span>
+                  </>
+                )}
+              </button>
+
+              <Link
+                href={`/app/pagoUnicoCourses/ContenidoCursos/${course.id}`}
+                prefetch={true}
+                onMouseEnter={() => onPrefetchCourse?.(course.id)}
+                onFocus={() => onPrefetchCourse?.(course.id)}
+                onTouchStart={() => onPrefetchCourse?.(course.id)}
+                onClick={() => onViewContent(course.id)}
+                aria-busy={isOpening}
+                className={`w-full inline-flex items-center justify-center gap-2 bg-[#014ba0] hover:bg-[#013b80] text-white font-bold text-xs sm:text-sm py-2.5 px-4 rounded-xl cursor-pointer transition-all ${
+                  isOpening ? 'opacity-85 pointer-events-none scale-[0.99]' : ''
+                }`}
+              >
+                {isOpening ? (
+                  <>
+                    <Loader2 size={17} className="animate-spin" />
+                    <span>Abriendo curso...</span>
+                  </>
+                ) : (
+                  <>
+                    <BookOpen size={17} />
+                    <span>Ver Contenido</span>
+                  </>
+                )}
+              </Link>
+            </div>
+          </div>
         </div>
-    </div>
-);
+      </article>
+    );
+  }
+
+  return (
+    <article
+      className={`group rounded-2xl border overflow-hidden flex flex-col justify-between transition-colors ${cardSurface}`}
+    >
+      <div>
+        {showCover ? (
+          <div
+            className={`relative overflow-hidden h-56 sm:h-60 w-full border-b ${
+              isDark ? 'border-white/10' : 'border-[#2E4A70]/10'
+            } ${coverSurfaceClass}`}
+          >
+            <img
+              src={coverUrl}
+              alt={course.title || 'Portada del curso'}
+              loading="lazy"
+              referrerPolicy={coverUrl.startsWith('http') ? 'no-referrer' : undefined}
+              onLoad={handleImageLoad}
+              onError={handleImageError}
+              className={`w-full h-full transition-transform duration-300 ${
+                isPortraitCover
+                  ? 'object-contain p-2 group-hover:scale-[1.03]'
+                  : 'object-cover object-center group-hover:scale-105'
+              }`}
+            />
+            {isCompleted && (
+              <div className="absolute top-3 right-3 bg-emerald-600 text-white rounded-full p-1.5">
+                <CheckCircle2 size={16} />
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="px-5 pt-5 pb-1 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className={`inline-flex items-center justify-center w-8 h-8 rounded-xl ${categoryBadgeClass}`}>
+                <BookOpen className="w-4 h-4" />
+              </span>
+              {categoryName && (
+                <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${categoryBadgeClass}`}>
+                  {categoryName}
+                </span>
+              )}
+            </div>
+            {isCompleted && (
+              <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-emerald-600 text-white">
+                <CheckCircle2 className="w-3 h-3" />
+                <span>Completado</span>
+              </span>
+            )}
+          </div>
+        )}
+
+        <div className={`p-5 ${showCover ? 'pt-4' : 'pt-3'} space-y-2`}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            {showCover && categoryName && (
+              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${categoryBadgeClass}`}>
+                {categoryName}
+              </span>
+            )}
+            <span className={`inline-flex items-center gap-1.5 text-xs font-bold tabular-nums ${mutedText}`}>
+              <Layers className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                {moduleCount} {moduleCount === 1 ? 'módulo' : 'módulos'}
+                {videoCount > 0
+                  ? ` · ${videoCount} ${videoCount === 1 ? 'clase' : 'clases'}`
+                  : ' · PDFs / Diapositivas'}
+              </span>
+            </span>
+          </div>
+
+          <h4 className="text-lg font-extrabold leading-snug line-clamp-2">
+            {course.title}
+          </h4>
+
+          {course.description && (
+            <p className={`text-sm leading-relaxed line-clamp-2 ${mutedText}`}>
+              {course.description}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="px-5 pb-5 pt-1 flex flex-col gap-2">
+        <Link
+          href={`/app/pagoUnicoCourses/ContenidoCursos/${course.id}`}
+          prefetch={true}
+          onMouseEnter={() => onPrefetchCourse?.(course.id)}
+          onFocus={() => onPrefetchCourse?.(course.id)}
+          onTouchStart={() => onPrefetchCourse?.(course.id)}
+          onClick={() => onViewContent(course.id)}
+          aria-busy={isOpening}
+          className={`w-full inline-flex items-center justify-center gap-2 bg-[#014ba0] hover:bg-[#013b80] text-white font-bold text-xs sm:text-sm py-2.5 px-4 rounded-xl cursor-pointer transition-all ${
+            isOpening ? 'opacity-85 pointer-events-none scale-[0.99]' : ''
+          }`}
+        >
+          {isOpening ? (
+            <>
+              <Loader2 size={17} className="animate-spin" />
+              <span>Abriendo curso...</span>
+            </>
+          ) : (
+            <>
+              <BookOpen size={17} />
+              <span>Ver Contenido</span>
+            </>
+          )}
+        </Link>
+
+        <button
+          type="button"
+          disabled={isToggling}
+          onClick={() => onToggleComplete(course.id, isCompleted)}
+          className={`w-full inline-flex items-center justify-center gap-2 font-bold text-xs sm:text-sm py-2 px-4 rounded-xl cursor-pointer transition-colors disabled:opacity-75 disabled:cursor-wait ${
+            isCompleted
+              ? isDark
+                ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30'
+                : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200'
+              : isDark
+              ? 'bg-white/10 text-blue-100 hover:bg-white/15'
+              : 'bg-[#F0F2F2] text-[#2E4A70] hover:bg-slate-200/80'
+          }`}
+        >
+          {isToggling ? (
+            <>
+              <Loader2 size={16} className="animate-spin" />
+              <span>{isCompleted ? 'Curso Completado' : 'Guardando...'}</span>
+            </>
+          ) : isCompleted ? (
+            <>
+              <CheckCircle2 size={16} />
+              <span>Curso Completado</span>
+            </>
+          ) : (
+            <>
+              <Bookmark size={16} />
+              <span>Marcar como Completado</span>
+            </>
+          )}
+        </button>
+      </div>
+    </article>
+  );
+};
 
 // Componente Principal
 export default function CoursesPagoUnicoPage() {
-    const { user, loading: authLoading } = useAuth();
+    const { user, firebaseAuthUser, loading: authLoading } = useAuth();
     const { isDark } = useTheme();
     const router = useRouter(); 
     const [courses, setCourses] = useState([]);
@@ -313,8 +624,18 @@ export default function CoursesPagoUnicoPage() {
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedCategory, setSelectedCategory] = useState('');
-    const [completedCourses, setCompletedCourses] = useState([]);
     const [viewMode, setViewMode] = useState('list');
+    const [openingCourseId, setOpeningCourseId] = useState(null);
+    const [togglingCourseId, setTogglingCourseId] = useState(null);
+    const [optimisticOverrides, setOptimisticOverrides] = useState({});
+    const completedCourses = useMemo(() => {
+        const base = new Set(user?.pagoUnicoCursosCompletados || []);
+        Object.entries(optimisticOverrides).forEach(([id, val]) => {
+            if (val) base.add(id);
+            else base.delete(id);
+        });
+        return Array.from(base);
+    }, [user?.pagoUnicoCursosCompletados, optimisticOverrides]);
 
     const swalTheme = {
         background: isDark ? '#1f2937' : '#ffffff', 
@@ -324,70 +645,69 @@ export default function CoursesPagoUnicoPage() {
     };
 
     useEffect(() => {
-        if (!user || !user.hasPagoUnicoAccess) {
+        if (!user?.uid || !user?.hasPagoUnicoAccess) {
             setLoading(false);
             return;
         }
 
-        // Cargar Cursos
-        const coursesQuery = query(collection(db, "Cursos_Pago_Unico"), where("isActive", "==", true));
-        const coursesUnsubscribe = onSnapshot(coursesQuery, (snapshot) => {
-            const allCourses = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setCourses(allCourses);
-            setLoading(false);
-        });
-        
-        // Cargar Categorías
-        const categoriesUnsubscribe = onSnapshot(collection(db, 'course_categories'), (snapshot) => {
-            const cats = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            cats.sort((a, b) => a.name.localeCompare(b.name));
-            setCategories(cats);
-        });
-
-        // Cargar cursos completados del usuario
-        const userDocRef = doc(db, 'users', user.uid);
-        const userUnsubscribe = onSnapshot(userDocRef, (doc) => {
-            if (doc.exists()) {
-                setCompletedCourses(doc.data().pagoUnicoCursosCompletados || []);
+        let cancelled = false;
+        const loadCatalog = async () => {
+            try {
+                const [allCourses, cats] = await Promise.all([
+                    getCachedPagoUnicoCourses({ onlyActive: true }),
+                    getCachedCategories(),
+                ]);
+                if (cancelled) return;
+                setCourses(allCourses);
+                setCategories(cats);
+            } catch (err) {
+                console.error('Error cargando cursos de pago único:', err);
+            } finally {
+                if (!cancelled) setLoading(false);
             }
-        });
-
-        return () => {
-            coursesUnsubscribe();
-            categoriesUnsubscribe();
-            userUnsubscribe();
         };
-    }, [user]);
+
+        loadCatalog();
+        return () => {
+            cancelled = true;
+        };
+    }, [user?.uid, user?.hasPagoUnicoAccess]);
 
     // Filtrar cursos
     const filteredCourses = useMemo(() => {
+        const q = searchTerm.trim().toLowerCase();
         return courses.filter(course => {
-            const matchesSearchTerm = course.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                                    course.description.toLowerCase().includes(searchTerm.toLowerCase());
+            const matchesSearchTerm =
+                !q ||
+                (course.title || '').toLowerCase().includes(q) ||
+                (course.description || '').toLowerCase().includes(q);
             const matchesCategory = selectedCategory ? course.categoryId === selectedCategory : true;
             return matchesSearchTerm && matchesCategory;
         });
     }, [courses, searchTerm, selectedCategory]);
 
-    // Agrupar cursos por categoría
-    const groupedCourses = useMemo(() => {
-        if (filteredCourses.length === 0) return {};
-        const categoryMap = new Map(categories.map(cat => [cat.id, cat.name]));
-        const groups = {};
-        const sortedCourses = [...filteredCourses].sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
-        
-        sortedCourses.forEach(course => {
-            const categoryName = categoryMap.get(course.categoryId) || 'Sin Categoría';
+    const categoryMap = useMemo(
+        () => new Map(categories.map(cat => [cat.id, cat.name])),
+        [categories]
+    );
 
-            if (!groups[categoryName]) groups[categoryName] = [];
-            groups[categoryName].push(course);
-        });
-        return groups;
-    }, [filteredCourses, categories]);
+    const sortedCourses = useMemo(
+        () => [...filteredCourses].sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)),
+        [filteredCourses]
+    );
 
-    // Función para marcar/desmarcar como completado
+    useEffect(() => {
+        if (!openingCourseId) return undefined;
+        const timer = setTimeout(() => setOpeningCourseId(null), 8000);
+        return () => clearTimeout(timer);
+    }, [openingCourseId]);
+
+    // Función para marcar/desmarcar como completado (optimista)
     const handleToggleComplete = async (courseId, isCompleted) => {
-        if (!user) return;
+        if (!user || togglingCourseId === courseId) return;
+        const nextVal = !isCompleted;
+        setTogglingCourseId(courseId);
+        setOptimisticOverrides((prev) => ({ ...prev, [courseId]: nextVal }));
         const userDocRef = doc(db, 'users', user.uid);
         try {
             await updateDoc(userDocRef, {
@@ -405,33 +725,66 @@ export default function CoursesPagoUnicoPage() {
             });
         } catch (error) {
             console.error("Error updating completed status:", error);
+            setOptimisticOverrides((prev) => {
+                const copy = { ...prev };
+                delete copy[courseId];
+                return copy;
+            });
             Swal.fire({ 
                 title: 'Error', 
                 text: 'No se pudo actualizar el estado del curso.', 
                 icon: 'error', 
                 ...swalTheme 
             });
+        } finally {
+            setTogglingCourseId((prev) => (prev === courseId ? null : prev));
         }
     };
 
+    const handlePrefetchCourse = (courseId) => {
+        if (!courseId) return;
+        router.prefetch(`/app/pagoUnicoCourses/ContenidoCursos/${courseId}`);
+        getCachedCourseMaterials(courseId, () => firebaseAuthUser?.getIdToken?.()).catch(() => {});
+    };
+
     const handleViewContent = (courseId) => {
-        router.push(`/app/pagoUnicoCourses/ContenidoCursos/${courseId}`);
+        setOpeningCourseId(courseId);
+        getCachedCourseMaterials(courseId, () => firebaseAuthUser?.getIdToken?.()).catch(() => {});
     };
 
     if (authLoading || loading) return (
-        <div className="min-h-screen bg-gradient-to-br from-orange-50 to-blue-50 flex justify-center items-center">
+        <div
+            className={`min-h-screen flex justify-center items-center ${
+                isDark ? 'bg-[#1a2639] text-white' : 'bg-[#FFF9F0] text-[#1a2639]'
+            }`}
+        >
             <div className="text-center">
-                <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-teal-600 mx-auto mb-4"></div>
-                <p className="text-xl font-semibold text-gray-700">Cargando Cursos...</p>
+                <div
+                    className={`animate-spin rounded-full h-14 w-14 border-b-2 mx-auto mb-4 ${
+                        isDark ? 'border-[#24B0BA]' : 'border-[#014ba0]'
+                    }`}
+                ></div>
+                <p className="text-lg font-bold">Cargando Cursos...</p>
             </div>
         </div>
     );
     
     if (!user) return (
-        <div className="min-h-screen bg-gradient-to-br from-orange-50 to-blue-50 flex justify-center items-center p-4">
-            <div className="text-center bg-white p-8 rounded-2xl shadow-xl">
-                <p className="text-xl text-gray-700 mb-4">Por favor, inicia sesión para continuar.</p>
-                <Link href="/login" className="inline-block bg-gradient-to-r from-teal-500 to-blue-600 text-white font-bold py-3 px-8 rounded-xl hover:from-teal-600 hover:to-blue-700 transition-all">
+        <div
+            className={`min-h-screen flex justify-center items-center p-4 ${
+                isDark ? 'bg-[#1a2639] text-white' : 'bg-[#FFF9F0] text-[#1a2639]'
+            }`}
+        >
+            <div
+                className={`text-center p-8 rounded-2xl border ${
+                    isDark ? 'bg-[#1e293b] border-white/10' : 'bg-white border-[#2E4A70]/15 shadow-sm'
+                }`}
+            >
+                <p className="text-lg font-semibold mb-4">Por favor, inicia sesión para continuar.</p>
+                <Link
+                    href="/login"
+                    className="inline-block bg-[#014ba0] hover:bg-[#013b80] text-white font-bold py-3 px-8 rounded-xl transition-colors"
+                >
                     Iniciar Sesión
                 </Link>
             </div>
@@ -441,81 +794,131 @@ export default function CoursesPagoUnicoPage() {
     if (!user.hasPagoUnicoAccess) return <AccessDeniedScreen user={user} isDark={isDark} swalTheme={swalTheme} />;
     
     return (
-        <div className="min-h-screen bg-gradient-to-br from-orange-50 via-white to-blue-50">
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className={`min-h-screen ${isDark ? 'bg-[#1a2639] text-white' : 'bg-[#FFF9F0] text-[#1a2639]'}`}>
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
                 {/* Header */}
-                <div className="text-center mb-12">
-                    <h1 className="text-5xl font-bold bg-gradient-to-r from-teal-600 to-blue-600 bg-clip-text text-transparent mb-4">
+                <div className="text-center mb-7">
+                    <h1 className={`text-3xl sm:text-4xl font-black tracking-tight mb-2 ${isDark ? 'text-white' : 'text-[#014ba0]'}`}>
                         Catálogo de Cursos
                     </h1>
-                    <p className="text-xl text-gray-600 max-w-2xl mx-auto">
+                    <p className={`text-sm sm:text-base max-w-2xl mx-auto ${isDark ? 'text-blue-200' : 'text-[#2E4A70]'}`}>
                         Accede a nuestros cursos exclusivos de pago único y potencia tu aprendizaje
                     </p>
                 </div>
 
                 {/* Barra de búsqueda y filtros */}
-                <div className="bg-white rounded-2xl shadow-xl p-6 mb-10 backdrop-blur-lg">
-                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-end">
+                <div
+                    className={`rounded-2xl border p-4 sm:p-5 mb-7 ${
+                        isDark ? 'bg-[#1e293b] border-white/10' : 'bg-white border-[#2E4A70]/15'
+                    }`}
+                >
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
                         {/* Búsqueda */}
-                        <div className="lg:col-span-5 relative">
-                            <label className="block text-sm font-semibold text-gray-700 mb-2">
+                        <div className="md:col-span-6 lg:col-span-5">
+                            <label
+                                htmlFor="student-course-search"
+                                className={`block text-xs font-extrabold uppercase tracking-wide mb-2 ${
+                                    isDark ? 'text-blue-200' : 'text-[#2E4A70]'
+                                }`}
+                            >
                                 Buscar Cursos
                             </label>
-                            <div className="relative">
-                                <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-gray-400" />
+                            <div
+                                className={`flex items-center gap-2.5 px-3.5 border rounded-xl transition-colors ${
+                                    isDark
+                                        ? 'bg-[#162235] border-white/15 text-white focus-within:border-[#24B0BA]'
+                                        : 'bg-white border-[#2E4A70]/25 text-[#1a2639] focus-within:border-[#014ba0]'
+                                }`}
+                            >
+                                <Search className="h-4 w-4 shrink-0 opacity-55 pointer-events-none" />
                                 <input
+                                    id="student-course-search"
                                     type="text"
                                     placeholder="Buscar por título o descripción..."
                                     value={searchTerm}
                                     onChange={(e) => setSearchTerm(e.target.value)}
-                                    className="w-full pl-12 pr-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition-all"
+                                    style={{ colorScheme: isDark ? 'dark' : 'light' }}
+                                    className={`w-full min-w-0 bg-transparent py-2.5 text-sm font-medium outline-none ${
+                                        isDark ? 'text-white placeholder:text-slate-400' : 'text-[#1a2639] placeholder:text-slate-400'
+                                    }`}
                                 />
                             </div>
                         </div>
 
                         {/* Filtro por categoría */}
-                        <div className="lg:col-span-4">
-                            <label className="block text-sm font-semibold text-gray-700 mb-2">
+                        <div className="md:col-span-6 lg:col-span-4">
+                            <label
+                                htmlFor="student-course-cat"
+                                className={`block text-xs font-extrabold uppercase tracking-wide mb-2 ${
+                                    isDark ? 'text-blue-200' : 'text-[#2E4A70]'
+                                }`}
+                            >
                                 Filtrar por Categoría
                             </label>
-                            <div className="relative">
-                                <Filter className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-gray-400" />
+                            <div
+                                className={`flex items-center gap-2.5 px-3.5 border rounded-xl transition-colors ${
+                                    isDark
+                                        ? 'bg-[#162235] border-white/15 text-white focus-within:border-[#24B0BA]'
+                                        : 'bg-white border-[#2E4A70]/25 text-[#1a2639] focus-within:border-[#014ba0]'
+                                }`}
+                            >
+                                <Filter className="h-4 w-4 shrink-0 opacity-55 pointer-events-none" />
                                 <select
+                                    id="student-course-cat"
                                     value={selectedCategory}
                                     onChange={(e) => setSelectedCategory(e.target.value)}
-                                    className="w-full pl-12 pr-8 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition-all appearance-none bg-white"
+                                    style={{ colorScheme: isDark ? 'dark' : 'light' }}
+                                    className="w-full min-w-0 bg-transparent py-2.5 text-sm font-semibold outline-none cursor-pointer"
                                 >
-                                    <option value="">Todas las categorías</option>
+                                    <option value="" className={isDark ? 'bg-[#1e293b] text-white' : 'bg-white text-[#1a2639]'}>
+                                        Todas las categorías
+                                    </option>
                                     {categories.map(cat => (
-                                        <option key={cat.id} value={cat.id}>{cat.name}</option>
+                                        <option
+                                            key={cat.id}
+                                            value={cat.id}
+                                            className={isDark ? 'bg-[#1e293b] text-white' : 'bg-white text-[#1a2639]'}
+                                        >
+                                            {cat.name}
+                                        </option>
                                     ))}
                                 </select>
                             </div>
                         </div>
 
                         {/* Controles de vista */}
-                        <div className="lg:col-span-3 flex justify-end">
-                            <div className="flex bg-gray-100 rounded-xl p-1">
+                        <div className="md:col-span-12 lg:col-span-3 flex justify-stretch sm:justify-end">
+                            <div
+                                className={`grid grid-cols-2 sm:inline-flex w-full sm:w-auto rounded-xl p-1 border ${
+                                    isDark ? 'bg-[#162235] border-white/10' : 'bg-[#FFF9F0] border-[#2E4A70]/15'
+                                }`}
+                            >
                                 <button
+                                    type="button"
                                     onClick={() => setViewMode('grid')}
-                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${
-                                        viewMode === 'grid' 
-                                            ? 'bg-white text-teal-600 shadow-md' 
-                                            : 'text-gray-600 hover:text-teal-600'
+                                    className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                                        viewMode === 'grid'
+                                            ? 'bg-[#014ba0] text-white'
+                                            : isDark
+                                            ? 'text-blue-200 hover:text-white'
+                                            : 'text-[#2E4A70] hover:text-[#014ba0]'
                                     }`}
                                 >
-                                    <Grid3X3 size={18} />
+                                    <Grid3X3 size={16} />
                                     Grid
                                 </button>
                                 <button
+                                    type="button"
                                     onClick={() => setViewMode('list')}
-                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${
-                                        viewMode === 'list' 
-                                            ? 'bg-white text-teal-600 shadow-md' 
-                                            : 'text-gray-600 hover:text-teal-600'
+                                    className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                                        viewMode === 'list'
+                                            ? 'bg-[#014ba0] text-white'
+                                            : isDark
+                                            ? 'text-blue-200 hover:text-white'
+                                            : 'text-[#2E4A70] hover:text-[#014ba0]'
                                     }`}
                                 >
-                                    <List size={18} />
+                                    <List size={16} />
                                     Lista
                                 </button>
                             </div>
@@ -523,133 +926,79 @@ export default function CoursesPagoUnicoPage() {
                     </div>
 
                     {/* Estadísticas */}
-                    <div className="mt-6 pt-4 border-t border-gray-200 flex flex-wrap gap-4 text-sm text-gray-600">
+                    <div
+                        className={`mt-5 pt-4 border-t flex flex-wrap gap-4 text-xs sm:text-sm font-semibold tabular-nums ${
+                            isDark ? 'border-white/10 text-blue-200' : 'border-[#2E4A70]/10 text-[#2E4A70]'
+                        }`}
+                    >
                         <div className="flex items-center gap-2">
-                            <span className="w-2 h-2 bg-teal-500 rounded-full"></span>
+                            <span className="w-2 h-2 bg-[#24B0BA] rounded-full"></span>
                             <span>Total: {filteredCourses.length} curso{filteredCourses.length !== 1 ? 's' : ''}</span>
                         </div>
                         <div className="flex items-center gap-2">
-                            <span className="w-2 h-2 bg-green-500 rounded-full"></span>
+                            <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>
                             <span>Completados: {completedCourses.length}</span>
                         </div>
                         <div className="flex items-center gap-2">
-                            <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
+                            <span className="w-2 h-2 bg-[#014ba0] rounded-full"></span>
                             <span>Pendientes: {filteredCourses.length - completedCourses.filter(id => filteredCourses.some(course => course.id === id)).length}</span>
                         </div>
                     </div>
                 </div>
 
                 {/* Contenido de cursos */}
-                {Object.keys(groupedCourses).length > 0 ? (
-                    <div className="space-y-12">
-                        {/* Categorías */}
-                        {Object.entries(groupedCourses).map(([categoryName, coursesInCategory]) => (
-                            <div key={categoryName}>
-                                {/* Título de la categoría */}
-                                <div className="flex items-center gap-4 mb-8">
-                                    <div className="flex-shrink-0 w-12 h-12 bg-gradient-to-br from-teal-500 to-blue-600 rounded-xl flex items-center justify-center">
-                                        <BookOpen className="h-6 w-6 text-white" />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-2xl font-bold text-gray-800">{categoryName}</h3>
-                                        <p className="text-gray-600">{coursesInCategory.length} curso{coursesInCategory.length !== 1 ? 's' : ''} disponible{coursesInCategory.length !== 1 ? 's' : ''}</p>
-                                    </div>
-                                </div>
-                                
-                                {/* Grid de cursos - RESPONSIVO CON 3 COLUMNAS */}
-                                <div className={viewMode === 'grid' 
-                                    ? "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8" 
-                                    : "space-y-6"
-                                }>
-                                    {coursesInCategory.map((course) => {
-                                        const isCompleted = completedCourses.includes(course.id);
-                                        
-                                        return viewMode === 'grid' ? (
-                                            <CourseCard
-                                                key={course.id}
-                                                course={course}
-                                                isCompleted={isCompleted}
-                                                onToggleComplete={handleToggleComplete}
-                                                onViewContent={handleViewContent}
-                                            />
-                                        ) : (
-                                            // Vista de lista
-                                            <div key={course.id} className="bg-white rounded-2xl shadow-lg hover:shadow-xl transition-all duration-300 overflow-hidden">
-                                                <div className="flex flex-col sm:flex-row">
-                                                    <div className="sm:w-80 h-48 sm:h-auto relative flex-shrink-0">
-                                                        <Image 
-                                                            src={convertGoogleDriveUrl(course.imageUrl)}
-                                                            alt={course.title} 
-                                                            width={320}
-                                                            height={200}
-                                                            className="w-full h-full object-cover"
-                                                            unoptimized={course.imageUrl?.includes('drive.google.com')}
-                                                        />
-                                                        {isCompleted && (
-                                                            <>
-                                                                <div className="absolute top-4 right-4 bg-gradient-to-r from-teal-500 to-blue-600 text-white rounded-full p-2 shadow-lg">
-                                                                    <CheckCircle2 size={18} />
-                                                                </div>
-                                                                <div className="absolute inset-0 bg-gradient-to-t from-teal-900/30 to-transparent"></div>
-                                                            </>
-                                                        )}
-                                                    </div>
-                                                    
-                                                    <div className="flex-1 p-6 flex flex-col">
-                                                        <div className="flex-1">
-                                                            <h4 className="text-xl font-bold text-gray-800 mb-3">
-                                                                {course.title}
-                                                            </h4>
-                                                            <p className="text-gray-600 mb-6 leading-relaxed">
-                                                                {course.description}
-                                                            </p>
-                                                        </div>
-                                                        
-                                                        <div className="flex flex-col sm:flex-row gap-3 mt-auto">
-                                                            <button 
-                                                                onClick={() => handleToggleComplete(course.id, isCompleted)} 
-                                                                className={`flex-1 inline-flex items-center justify-center gap-2 font-semibold py-3 px-4 rounded-xl transition-all duration-300 ${
-                                                                    isCompleted 
-                                                                        ? 'bg-gradient-to-r from-teal-100 to-blue-100 text-teal-700 hover:from-teal-200 hover:to-blue-200' 
-                                                                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                                                }`}
-                                                            >
-                                                                {isCompleted ? 
-                                                                    <><CheckCircle2 size={18} /> Completado</> : 
-                                                                    <><Bookmark size={18} /> Marcar Completado</>
-                                                                }
-                                                            </button>
-                                                            
-                                                            <button 
-                                                                onClick={() => handleViewContent(course.id)} 
-                                                                className="flex-1 inline-flex items-center justify-center gap-2 bg-gradient-to-r from-teal-500 to-blue-600 text-white font-bold py-3 px-4 rounded-xl hover:from-teal-600 hover:to-blue-700 transition-all duration-300 shadow-lg hover:shadow-xl"
-                                                            >
-                                                                <BookOpen size={20} /> 
-                                                                Ver Contenido
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                        ))}
+                {sortedCourses.length > 0 ? (
+                    <div
+                        className={
+                            viewMode === 'grid'
+                                ? 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6'
+                                : 'space-y-5'
+                        }
+                    >
+                        {sortedCourses.map((course) => {
+                            const isCompleted = completedCourses.includes(course.id);
+                            const categoryName = categoryMap.get(course.categoryId) || '';
+
+                            return (
+                                <CourseCard
+                                    key={course.id}
+                                    course={course}
+                                    categoryName={categoryName}
+                                    isCompleted={isCompleted}
+                                    isOpening={openingCourseId === course.id}
+                                    isToggling={togglingCourseId === course.id}
+                                    onToggleComplete={handleToggleComplete}
+                                    onViewContent={handleViewContent}
+                                    onPrefetchCourse={handlePrefetchCourse}
+                                    isDark={isDark}
+                                    layout={viewMode === 'list' ? 'list' : 'grid'}
+                                />
+                            );
+                        })}
                     </div>
                 ) : (
-                    // Estado vacío mejorado
-                    <div className="text-center py-20">
-                        <div className="max-w-md mx-auto bg-white rounded-2xl shadow-xl p-8">
-                            <div className="w-24 h-24 bg-gradient-to-br from-gray-100 to-gray-200 rounded-full flex items-center justify-center mx-auto mb-6">
-                                <Search className="h-12 w-12 text-gray-400" />
+                    // Estado vacío
+                    <div className="text-center py-16">
+                        <div
+                            className={`max-w-md mx-auto rounded-2xl border p-8 ${
+                                isDark
+                                    ? 'bg-[#1e293b] border-white/10 text-white'
+                                    : 'bg-white border-[#2E4A70]/15 text-[#1a2639] shadow-sm'
+                            }`}
+                        >
+                            <div
+                                className={`w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-5 ${
+                                    isDark ? 'bg-[#162235] text-[#24B0BA]' : 'bg-[#FFF9F0] text-[#014ba0]'
+                                }`}
+                            >
+                                <Search className="h-9 w-9" />
                             </div>
                             
-                            <h3 className="text-2xl font-bold text-gray-800 mb-4">
+                            <h3 className="text-xl sm:text-2xl font-extrabold mb-3">
                                 No se encontraron cursos
                             </h3>
                             
-                            <p className="text-gray-600 mb-8 leading-relaxed">
+                            <p className={`text-sm mb-7 leading-relaxed ${isDark ? 'text-blue-200/80' : 'text-[#2E4A70]'}`}>
                                 {searchTerm || selectedCategory 
                                     ? 'Intenta ajustar tu búsqueda o filtro de categoría para encontrar más cursos.'
                                     : 'Aún no hay cursos disponibles en el catálogo.'
@@ -659,33 +1008,44 @@ export default function CoursesPagoUnicoPage() {
                             {(searchTerm || selectedCategory) && (
                                 <div className="space-y-3">
                                     <button
+                                        type="button"
                                         onClick={() => {
                                             setSearchTerm('');
                                             setSelectedCategory('');
                                         }}
-                                        className="w-full bg-gradient-to-r from-teal-500 to-blue-600 text-white font-bold py-3 px-6 rounded-xl hover:from-teal-600 hover:to-blue-700 transition-all duration-300"
+                                        className="w-full bg-[#014ba0] hover:bg-[#013b80] text-white font-bold py-3 px-6 rounded-xl cursor-pointer transition-colors"
                                     >
                                         Limpiar Filtros
                                     </button>
                                     
                                     <div className="flex flex-wrap gap-2 justify-center">
                                         {searchTerm && (
-                                            <span className="inline-flex items-center gap-1 bg-gray-100 text-gray-700 px-3 py-1 rounded-full text-sm">
-                                                Búsqueda: "{searchTerm}"
+                                            <span
+                                                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
+                                                    isDark ? 'bg-white/10 text-blue-100' : 'bg-[#F0F2F2] text-[#2E4A70]'
+                                                }`}
+                                            >
+                                                Búsqueda: &ldquo;{searchTerm}&rdquo;
                                                 <button 
+                                                    type="button"
                                                     onClick={() => setSearchTerm('')}
-                                                    className="text-gray-500 hover:text-gray-700"
+                                                    className="opacity-70 hover:opacity-100 cursor-pointer"
                                                 >
                                                     ✕
                                                 </button>
                                             </span>
                                         )}
                                         {selectedCategory && (
-                                            <span className="inline-flex items-center gap-1 bg-gray-100 text-gray-700 px-3 py-1 rounded-full text-sm">
+                                            <span
+                                                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
+                                                    isDark ? 'bg-white/10 text-blue-100' : 'bg-[#F0F2F2] text-[#2E4A70]'
+                                                }`}
+                                            >
                                                 Categoría: {categories.find(cat => cat.id === selectedCategory)?.name}
                                                 <button 
+                                                    type="button"
                                                     onClick={() => setSelectedCategory('')}
-                                                    className="text-gray-500 hover:text-gray-700"
+                                                    className="opacity-70 hover:opacity-100 cursor-pointer"
                                                 >
                                                     ✕
                                                 </button>
@@ -699,28 +1059,38 @@ export default function CoursesPagoUnicoPage() {
                 )}
 
                 {/* Footer con estadísticas adicionales */}
-                {Object.keys(groupedCourses).length > 0 && (
-                    <div className="mt-16 bg-white rounded-2xl shadow-xl p-8">
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 text-center">
-                            <div className="space-y-2">
-                                <div className="text-3xl font-bold bg-gradient-to-r from-teal-600 to-blue-600 bg-clip-text text-transparent">
+                {sortedCourses.length > 0 && (
+                    <div
+                        className={`mt-10 rounded-2xl border p-6 sm:p-8 ${
+                            isDark ? 'bg-[#1e293b] border-white/10' : 'bg-white border-[#2E4A70]/15'
+                        }`}
+                    >
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-center tabular-nums">
+                            <div className="space-y-1">
+                                <div className={`text-3xl font-black ${isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'}`}>
                                     {filteredCourses.length}
                                 </div>
-                                <p className="text-gray-600 font-semibold">Cursos Disponibles</p>
+                                <p className={`text-sm font-semibold ${isDark ? 'text-blue-200' : 'text-[#2E4A70]'}`}>
+                                    Cursos Disponibles
+                                </p>
                             </div>
                             
-                            <div className="space-y-2">
-                                <div className="text-3xl font-bold bg-gradient-to-r from-green-600 to-teal-600 bg-clip-text text-transparent">
+                            <div className="space-y-1">
+                                <div className="text-3xl font-black text-emerald-500">
                                     {completedCourses.filter(id => filteredCourses.some(course => course.id === id)).length}
                                 </div>
-                                <p className="text-gray-600 font-semibold">Cursos Completados</p>
+                                <p className={`text-sm font-semibold ${isDark ? 'text-blue-200' : 'text-[#2E4A70]'}`}>
+                                    Cursos Completados
+                                </p>
                             </div>
                             
-                            <div className="space-y-2">
-                                <div className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+                            <div className="space-y-1">
+                                <div className={`text-3xl font-black ${isDark ? 'text-white' : 'text-[#1a2639]'}`}>
                                     {Math.round((completedCourses.filter(id => filteredCourses.some(course => course.id === id)).length / filteredCourses.length) * 100) || 0}%
                                 </div>
-                                <p className="text-gray-600 font-semibold">Progreso General</p>
+                                <p className={`text-sm font-semibold ${isDark ? 'text-blue-200' : 'text-[#2E4A70]'}`}>
+                                    Progreso General
+                                </p>
                             </div>
                         </div>
                     </div>

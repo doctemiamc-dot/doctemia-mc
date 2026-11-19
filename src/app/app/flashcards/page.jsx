@@ -1,15 +1,29 @@
 "use client";
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, getDocs, query, orderBy, where } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 
 import { useRouter } from 'next/navigation';
 import { useTheme } from '@/context/ThemeContext';
 import { useAuth } from '@/context/AuthContext';
-import { getFlashcardMetrics, restoreMasteredFlashcards, getMasteredCount } from '@/lib/flashcardServices';
+import {
+  getFlashcardMetrics,
+  restoreMasteredFlashcards,
+  getMasteredCount,
+  getCategoryFlashcardCounts,
+  getSubthemeFlashcardCounts,
+} from '@/lib/flashcardServices';
+import {
+  getCachedCategories,
+  getCachedSubcategories,
+  getCachedContactInfo,
+  getCachedPendingAccessRequest,
+  setCachedPendingAccessRequest,
+} from '@/lib/catalogCache';
 import { 
   BookOpen, 
   ChevronRight, 
+  ChevronDown,
   Layers, 
   GraduationCap, 
   Search,
@@ -43,22 +57,17 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
     
     useEffect(() => {
         const checkRequestAndLoadInfo = async () => {
-            if (user) {
-                const { collection, query, where, getDocs, doc, getDoc } = await import('firebase/firestore');
-                const q = query(collection(db, "pagoUnico_solicitudes"), where("userId", "==", user.uid), where("status", "==", "pendiente"));
-                const querySnapshot = await getDocs(q);
-                if (!querySnapshot.empty) {
-                    setRequestSent(true);
-                }
-                const contactInfoRef = doc(db, 'pags', 'infoContacto');
-                const docSnap = await getDoc(contactInfoRef);
-                if (docSnap.exists()) {
-                    setContactInfo(docSnap.data());
-                }
+            if (user?.uid) {
+                const [hasPending, info] = await Promise.all([
+                    getCachedPendingAccessRequest(user.uid),
+                    getCachedContactInfo(),
+                ]);
+                if (hasPending) setRequestSent(true);
+                if (info) setContactInfo(info);
             }
         };
         checkRequestAndLoadInfo();
-    }, [user]);
+    }, [user?.uid]);
 
     const handleRequestAccessPopup = () => {
         setShowModal(true);
@@ -88,6 +97,7 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
                 type: 'flashcards_access' 
             });
             setRequestSent(true);
+            setCachedPendingAccessRequest(user.uid, true);
             setShowModal(false);
             Swal.fire({ 
                 title: '¡Solicitud Enviada!', 
@@ -122,7 +132,7 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
 
                 <div className="space-y-4">
                     {requestSent ? (
-                        <div className="flex items-center justify-center gap-3 p-4 bg-amber-100 rounded-lg border-l-4 border-amber-400">
+                        <div className="flex items-center justify-center gap-3 p-4 bg-amber-50 rounded-xl border border-amber-300">
                             <Hourglass className="h-6 w-6 text-amber-600 animate-spin" />
                             <span className="font-semibold text-amber-800">Tu solicitud está en proceso</span>
                         </div>
@@ -153,7 +163,7 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-50 backdrop-blur-sm">
                     <div className="relative w-full max-w-md bg-white rounded-2xl shadow-2xl transform scale-100 transition-all duration-300">
                         <div className="flex items-center justify-between p-6 border-b border-gray-200">
-                            <h3 className="text-2xl font-bold bg-gradient-to-r from-teal-600 to-blue-600 bg-clip-text text-transparent">
+                            <h3 className="text-2xl font-bold text-[#014ba0]">
                                 ¡Obtén tu Acceso!
                             </h3>
                             <button 
@@ -253,160 +263,184 @@ export default function StudentFlashcardsPage() {
   const { user } = useAuth();
   const router = useRouter();
   const [categories, setCategories] = useState([]);
+  const [catCardCounts, setCatCardCounts] = useState({});
   const [selectedCat, setSelectedCat] = useState(null);
   const [subthemes, setSubthemes] = useState([]);
-  const [globalCounts, setGlobalCounts] = useState({}); // Nuevo: Almacena conteos globales
-  const [masteredCounts, setMasteredCounts] = useState({}); // Nuevo: Conteos de dominadas por subtema
+  const [globalCounts, setGlobalCounts] = useState({});
+  const [masteredCounts, setMasteredCounts] = useState({});
   const [loading, setLoading] = useState(true);
   const [loadingSub, setLoadingSub] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [subthemeSearch, setSubthemeSearch] = useState('');
   const [metrics, setMetrics] = useState({ 
     dueToday: 0, 
     totalLearning: 0, 
     performanceBySubtheme: [],
     criticalCards: []
   });
-  const [criticalQuestions, setCriticalQuestions] = useState({}); // Mapeo ID -> Texto Pregunta
+  const [criticalQuestions, setCriticalQuestions] = useState({});
   const [loadingMetrics, setLoadingMetrics] = useState(true);
+  const masteredMapRef = useRef({});
+  const subthemesPanelRef = useRef(null);
   
   // Estado para la Radiografía
   const [selectedCardForRadiography, setSelectedCardForRadiography] = useState(null);
-
-  const swalTheme = {
-    background: isDark ? '#1f2937' : '#ffffff', 
-    color: isDark ? '#f9fafb' : '#111827',
-    confirmButtonColor: '#14B8A6', 
-    cancelButtonColor: '#F59E0B',
-  };
+  const [showCriticalCards, setShowCriticalCards] = useState(false);
+  const [openingSubtheme, setOpeningSubtheme] = useState(null);
 
   useEffect(() => {
-    if (!user || !user.hasPagoUnicoAccess) {
-        setLoading(false);
-        setLoadingMetrics(false);
-        return;
+    router.prefetch('/app/flashcards/estudio');
+  }, [router]);
+
+  useEffect(() => {
+    if (!openingSubtheme) return undefined;
+    const timer = setTimeout(() => setOpeningSubtheme(null), 8000);
+    return () => clearTimeout(timer);
+  }, [openingSubtheme]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+      setShowCriticalCards(true);
     }
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        // 1. Obtener todas las categorías (Especialidades)
-        const q = query(collection(db, 'course_categories'), orderBy('name', 'asc'));
-        const querySnapshot = await getDocs(q);
-        const allCategories = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  }, []);
 
-        // 2. Obtener todas las flashcards para identificar especialidades "activas"
-        // Consultamos solo lo necesario para el filtrado
-        const flashcardsRef = collection(db, 'flashcards');
-        const flashSnap = await getDocs(flashcardsRef);
-        
-        const activeCatIds = new Set();
-        const counts = {};
+  const swalTheme = {
+    background: isDark ? '#1e293b' : '#ffffff', 
+    color: isDark ? '#f9fafb' : '#1a2639',
+    confirmButtonColor: '#014ba0', 
+    cancelButtonColor: '#CF8A40',
+  };
 
-        flashSnap.forEach(doc => {
-          const data = doc.data();
-          const catId = data.especialidad;
-          // Validación robusta: asegurar que subtema existe y es string antes de trim
-          const subName = (data.subtema && typeof data.subtema === 'string') ? data.subtema.trim() : null;
-
-          if (catId) activeCatIds.add(catId);
-          if (subName) {
-            counts[subName] = (counts[subName] || 0) + 1;
-          }
-        });
-
-        // 3. Filtrar: Solo especialidades que tienen al menos 1 tarjeta
-        const filtered = allCategories.filter(cat => activeCatIds.has(cat.id));
-        
-        setCategories(filtered);
-        setGlobalCounts(counts); // Guardamos conteos para uso inmediato
-      } catch (error) {
-        console.error("Error fetching categories:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    const fetchUserMetrics = async () => {
-      if (!user) return;
-      setLoadingMetrics(true);
-      try {
-        const stats = await getFlashcardMetrics(user.uid);
-        setMetrics(stats);
-
-        // Fetch questions for critical cards
-        if (stats.criticalCards.length > 0) {
-          const questions = {};
-          const validCriticalCards = [];
-
-          for (const card of stats.criticalCards) {
-            const cardDoc = await getDocs(query(collection(db, 'flashcards'), where('__name__', '==', card.id)));
-            if (!cardDoc.empty) {
-              questions[card.id] = cardDoc.docs[0].data().pregunta;
-              validCriticalCards.push(card);
-            }
-            // Si cardDoc está vacío, es un huérfano y no lo añadimos a validCriticalCards
-          }
-          
-          setCriticalQuestions(questions);
-          // Solo mostramos las tarjetas que realmente existen
-          setMetrics(prev => ({ ...prev, criticalCards: validCriticalCards }));
-        }
-      } catch (error) {
-        console.error("Error fetching metrics:", error);
-      } finally {
-        setLoadingMetrics(false);
-      }
-    };
-
-    fetchData();
-    fetchUserMetrics();
-  }, [user]);
-
-  const handleSelectCategory = async (cat) => {
+  const handleSelectCategory = async (cat, scrollOnMobile = false) => {
     setSelectedCat(cat);
+    setSubthemeSearch('');
     setLoadingSub(true);
+    if (scrollOnMobile && typeof window !== 'undefined' && window.innerWidth < 1024) {
+      setTimeout(() => {
+        subthemesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 60);
+    }
     try {
-      // 1. Obtener subtemas de la especialidad seleccionada
-      const subRef = collection(db, 'course_categories', cat.id, 'subcategories');
-      const q = query(subRef, orderBy('name', 'asc'));
-      const querySnapshot = await getDocs(q);
-      const allSubthemes = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const allSubthemes = await getCachedSubcategories(cat.id);
+      const subCounts = await getSubthemeFlashcardCounts(cat.id, allSubthemes);
+      const masteredMap = masteredMapRef.current || {};
 
-      // 2. Obtener conteo de dominadas por subtema
       const mastered = {};
       for (const sub of allSubthemes) {
-        if (sub.name) {
-          mastered[sub.name.trim()] = await getMasteredCount(user.uid, sub.name.trim());
+        const cleanName = sub.name?.trim();
+        if (cleanName) {
+          mastered[cleanName] = masteredMap[cleanName] || 0;
         }
       }
-      setMasteredCounts(mastered);
+      setMasteredCounts((prev) => ({ ...prev, ...mastered }));
+      setGlobalCounts((prev) => ({ ...prev, ...subCounts }));
 
-      // 3. Cruzamos con los conteos globales que ya tenemos en memoria
       const activeSubthemes = allSubthemes
-        .map(sub => ({
+        .map((sub) => ({
           ...sub,
-          cardCount: globalCounts[sub.name?.trim()] || 0
+          cardCount: subCounts[sub.name?.trim()] || 0,
         }))
-        .filter(sub => sub.cardCount > 0); // Ocultar vacíos
+        .filter((sub) => sub.cardCount > 0);
 
       setSubthemes(activeSubthemes);
     } catch (error) {
-      console.error("Error fetching subthemes:", error);
+      console.error('Error fetching subthemes:', error);
     } finally {
       setLoadingSub(false);
     }
   };
+
+  useEffect(() => {
+    if (!user?.uid || !user?.hasPagoUnicoAccess) {
+      setLoading(false);
+      setLoadingMetrics(false);
+      return;
+    }
+    let cancelled = false;
+
+    const loadDashboardData = async () => {
+      setLoading(true);
+      setLoadingMetrics(true);
+      try {
+        // 1. Cargar especialidades desde caché y métricas del alumno en paralelo (SIN descargar toda la colección flashcards)
+        const [allCategories, stats] = await Promise.all([
+          getCachedCategories(),
+          getFlashcardMetrics(user.uid),
+        ]);
+        if (cancelled) return;
+
+        masteredMapRef.current = stats.masteredCountsMap || {};
+        setCriticalQuestions(stats.criticalQuestions || {});
+        setMetrics(stats);
+        setLoadingMetrics(false);
+
+        // 2. Obtener conteos por especialidad mediante getCountFromServer cacheado en sesión
+        const perCatCounts = await getCategoryFlashcardCounts(allCategories);
+        if (cancelled) return;
+
+        const filtered = allCategories.filter((cat) => (perCatCounts[cat.id] || 0) > 0);
+        setCategories(filtered);
+        setCatCardCounts(perCatCounts);
+        setLoading(false);
+
+        // 3. Preseleccionar la primera especialidad activa y cargar sus subtemas
+        if (filtered.length > 0) {
+          const firstCat = filtered[0];
+          setSelectedCat(firstCat);
+          setLoadingSub(true);
+          try {
+            const allSubs = await getCachedSubcategories(firstCat.id);
+            const subCounts = await getSubthemeFlashcardCounts(firstCat.id, allSubs);
+            if (cancelled) return;
+
+            const mastered = {};
+            for (const sub of allSubs) {
+              const cleanName = sub.name?.trim();
+              if (cleanName) {
+                mastered[cleanName] = masteredMapRef.current[cleanName] || 0;
+              }
+            }
+            setMasteredCounts(mastered);
+            setGlobalCounts(subCounts);
+            setSubthemes(
+              allSubs
+                .map((sub) => ({ ...sub, cardCount: subCounts[sub.name?.trim()] || 0 }))
+                .filter((sub) => sub.cardCount > 0)
+            );
+          } catch (subErr) {
+            console.error('Error preloading first category:', subErr);
+          } finally {
+            if (!cancelled) setLoadingSub(false);
+          }
+        }
+      } catch (error) {
+        console.error('Error loading flashcards dashboard:', error);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+          setLoadingMetrics(false);
+        }
+      }
+    };
+
+    loadDashboardData();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid, user?.hasPagoUnicoAccess]);
 
   const handleRestore = async (e, subtemaName) => {
     e.stopPropagation();
     try {
       await restoreMasteredFlashcards(user.uid, subtemaName);
       toast.success(`Tarjetas de ${subtemaName} restauradas.`);
-      // Refrescar conteos
       const newCount = await getMasteredCount(user.uid, subtemaName);
-      setMasteredCounts(prev => ({ ...prev, [subtemaName]: newCount }));
-      
-      // Refrescar métricas generales
+      masteredMapRef.current = { ...masteredMapRef.current, [subtemaName]: newCount };
+      setMasteredCounts((prev) => ({ ...prev, [subtemaName]: newCount }));
+
       const stats = await getFlashcardMetrics(user.uid);
+      masteredMapRef.current = stats.masteredCountsMap || {};
+      setCriticalQuestions(stats.criticalQuestions || {});
       setMetrics(stats);
     } catch (error) {
       console.error("Error restoring cards:", error);
@@ -415,6 +449,8 @@ export default function StudentFlashcardsPage() {
   };
 
   const startStudy = (subtemaName) => {
+    if (!subtemaName || openingSubtheme) return;
+    setOpeningSubtheme(subtemaName);
     router.push(`/app/flashcards/estudio?subtema=${encodeURIComponent(subtemaName)}`);
   };
 
@@ -424,6 +460,10 @@ export default function StudentFlashcardsPage() {
 
   const filteredCategories = categories.filter(c => 
     c.name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  const filteredSubthemes = subthemes.filter(sub =>
+    (sub.name || '').toLowerCase().includes(subthemeSearch.toLowerCase())
   );
 
   return (
@@ -480,7 +520,7 @@ export default function StudentFlashcardsPage() {
                     <div className="h-10 w-20 bg-gray-200/20 animate-pulse rounded-lg"></div>
                   ) : (
                     <div className="flex items-baseline gap-2">
-                      <span className={`text-6xl font-black ${isDark ? 'text-white' : 'text-indigo-600'}`}>{metrics.totalLearning}</span>
+                      <span className={`text-6xl font-black ${isDark ? 'text-white' : 'text-blue-700'}`}>{metrics.totalLearning}</span>
                       <span className="text-sm font-black opacity-40 uppercase tracking-tighter">Temas</span>
                     </div>
                   )}
@@ -527,220 +567,401 @@ export default function StudentFlashcardsPage() {
             </div>
           </div>
 
-          {/* Sección de Tarjetas Críticas - Layout Horizontal de Ancho Completo */}
-          <div className={`w-full p-8 sm:p-10 rounded-[2rem] border shadow-xl animate-gradient-shift ${
+          {/* Sección de Tarjetas Críticas - Desplegable en móvil para evitar scroll largo */}
+          <div className={`w-full p-6 sm:p-10 rounded-[2rem] border shadow-xl animate-gradient-shift ${
             isDark 
               ? 'bg-gray-900/40 border-gray-800 shadow-gray-900/20' 
               : 'border-blue-900/20 bg-gradient-to-br from-[#1a2e4d] via-[#2E4A70] to-[#3b82f6] shadow-blue-500/20'
           }`}>
-            <div className="text-center mb-10">
-              <h3 className={`text-5xl font-bold mb-4 ${isDark ? 'bg-gradient-to-r from-[#2E4A70] to-[#3B82F6] bg-clip-text text-transparent' : 'text-white'}`}>
+            <div className={`text-center ${showCriticalCards || metrics.criticalCards.length === 0 ? 'mb-8 sm:mb-10' : 'mb-2'}`}>
+              <h3 className={`text-3xl sm:text-5xl font-bold mb-3 sm:mb-4 ${isDark ? 'text-white' : 'text-white'}`}>
                 Tus Tarjetas Críticas
               </h3>
-              <p className={`text-xl max-w-2xl mx-auto mb-8 ${isDark ? 'text-gray-600' : 'text-blue-100/80'}`}>
+              <p className={`text-base sm:text-xl max-w-2xl mx-auto ${metrics.criticalCards.length > 0 ? 'mb-6' : 'mb-8'} ${isDark ? 'text-gray-300' : 'text-blue-100/80'}`}>
                 Conceptos que requieren refuerzo inmediato
               </p>
+
+              {!loadingMetrics && metrics.criticalCards.length > 0 && (
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => setShowCriticalCards((prev) => !prev)}
+                    aria-expanded={showCriticalCards}
+                    className="inline-flex items-center gap-2.5 px-5 py-2.5 rounded-full bg-white/15 hover:bg-white/25 border border-white/25 text-white text-xs sm:text-sm font-bold transition-colors cursor-pointer"
+                  >
+                    <span>
+                      {showCriticalCards
+                        ? `Ocultar tarjetas (${metrics.criticalCards.length})`
+                        : `Desplegar tarjetas críticas (${metrics.criticalCards.length})`}
+                    </span>
+                    <ChevronDown
+                      className={`w-4 h-4 transition-transform duration-200 ${
+                        showCriticalCards ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+                </div>
+              )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-              {loadingMetrics ? (
-                [1,2,3].map(i => <div key={i} className="h-40 w-full bg-gray-100 animate-pulse rounded-[2rem]"></div>)
-              ) : metrics.criticalCards.length === 0 ? (
-                <div className="col-span-full py-12 flex flex-col items-center justify-center opacity-40 text-center">
-                  <Activity className="w-12 h-12 mb-4 text-green-500" />
-                  <p className={`text-lg font-bold uppercase tracking-widest ${isDark ? 'text-white' : 'text-[#2E4A70]'}`}>¡Felicidades! No tienes debilidades críticas.</p>
-                </div>
-              ) : metrics.criticalCards.map((card, idx) => (
-                <div 
-                  key={idx} 
-                  onClick={() => setSelectedCardForRadiography({
-                    ...card,
-                    pregunta: criticalQuestions[card.id] || 'Cargando pregunta...'
-                  })}
-                  className={`group p-6 rounded-[2rem] border flex flex-col justify-between transition-all hover:shadow-2xl hover:scale-[1.02] cursor-pointer min-h-[180px] ${
-                  isDark ? 'bg-gray-800 border-gray-700 hover:border-blue-500/50' : 'bg-white border-gray-100 shadow-sm hover:border-blue-200'
-                }`}>
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-start gap-2">
-                      <span className={`text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full ${isDark ? 'bg-gray-700 text-gray-400' : 'bg-gray-50 text-gray-500'}`}>
-                        {card.subtema}
-                      </span>
-                      <span className="flex items-center gap-1 text-[10px] font-black bg-red-50 text-red-500 px-3 py-1 rounded-full border border-red-100">
-                        {card.totalFallos} FALLOS
-                      </span>
+            {loadingMetrics ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                {[1,2,3].map(i => <div key={i} className="h-40 w-full bg-gray-100 animate-pulse rounded-[2rem]"></div>)}
+              </div>
+            ) : metrics.criticalCards.length === 0 ? (
+              <div className="py-10 flex flex-col items-center justify-center opacity-60 text-center">
+                <Activity className="w-12 h-12 mb-4 text-green-400" />
+                <p className="text-lg font-bold uppercase tracking-widest text-white">¡Felicidades! No tienes debilidades críticas.</p>
+              </div>
+            ) : showCriticalCards && (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 max-h-[65vh] overflow-y-auto pr-1 custom-scrollbar">
+                {metrics.criticalCards.map((card, idx) => (
+                  <div 
+                    key={idx} 
+                    onClick={() => setSelectedCardForRadiography({
+                      ...card,
+                      pregunta: criticalQuestions[card.id] || 'Cargando pregunta...'
+                    })}
+                    className={`group p-6 rounded-[2rem] border flex flex-col justify-between transition-all hover:shadow-2xl cursor-pointer min-h-[180px] ${
+                    isDark ? 'bg-gray-800 border-gray-700 hover:border-blue-500/50' : 'bg-white border-gray-100 shadow-sm hover:border-blue-200'
+                  }`}>
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-start gap-2">
+                        <span className={`text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full ${isDark ? 'bg-gray-700 text-gray-300' : 'bg-gray-50 text-gray-500'}`}>
+                          {card.subtema}
+                        </span>
+                        <span className="flex items-center gap-1 text-[10px] font-black bg-red-50 text-red-500 px-3 py-1 rounded-full border border-red-100 shrink-0">
+                          {card.totalFallos} FALLOS
+                        </span>
+                      </div>
+                      <p className={`text-lg font-black leading-tight line-clamp-3 ${isDark ? 'text-white' : 'text-[#2E4A70]'}`}>
+                        &ldquo;{criticalQuestions[card.id] || 'Cargando pregunta...'}&rdquo;
+                      </p>
                     </div>
-                    <p className={`text-lg font-black leading-tight line-clamp-3 ${isDark ? 'text-white' : 'text-[#2E4A70]'}`}>
-                      "{criticalQuestions[card.id] || 'Cargando pregunta...'}"
-                    </p>
+                    
+                    <div className="mt-4 flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-80 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                      <span className="text-blue-500">Ver Radiografía</span>
+                      <ArrowRightCircle className="w-4 h-4 text-blue-500" />
+                    </div>
                   </div>
-                  
-                  <div className="mt-4 flex items-center justify-between text-[10px] font-black uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">
-                    <span className="text-blue-500">Ver Radiografía</span>
-                    <ArrowRightCircle className="w-4 h-4 text-blue-500" />
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </section>
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
+        {/* Explorador Responsivo (Abajo): Especialidad (Paso 1) -> Subtemas (Paso 2) */}
+        <section className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6 items-start">
           
-          {/* SELECCIÓN DE ESPECIALIDAD */}
-          <div className="lg:col-span-4 flex flex-col gap-6">
-            <div className={`p-8 rounded-[2rem] shadow-xl border transition-all ${
-              isDark ? 'bg-gray-800/50 border-gray-700' : 'bg-white border-gray-100 shadow-gray-200/50'
-            }`}>
-              <div className="flex items-center justify-between mb-8">
-                <h2 className={`text-2xl font-black flex items-center gap-3 ${isDark ? 'text-white' : 'text-[#2E4A70]'}`}>
-                  <BookOpen className="w-6 h-6 text-blue-500" /> Especialidades
+          {/* PASO 1: ESPECIALIDADES (Chips compactos en móvil, lista vertical acotada en desktop) */}
+          <div className="lg:col-span-4">
+            <div
+              className={`p-4 sm:p-5 rounded-2xl sm:rounded-3xl border shadow-sm ${
+                isDark ? 'bg-[#1e293b] border-white/10' : 'bg-white border-[#2E4A70]/15'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2 mb-3.5">
+                <h2 className={`text-base sm:text-lg font-extrabold flex items-center gap-2 ${isDark ? 'text-white' : 'text-[#1a2639]'}`}>
+                  <BookOpen className={`w-4 h-4 sm:w-5 sm:h-5 ${isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'}`} />
+                  <span>Especialidades</span>
                 </h2>
-                <span className="text-[10px] font-black px-4 py-1.5 bg-blue-500/10 text-blue-500 rounded-full uppercase tracking-[0.2em]">Paso 1</span>
+                <span
+                  className={`text-[10px] font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider ${
+                    isDark ? 'bg-[#24B0BA]/20 text-[#24B0BA]' : 'bg-[#014ba0]/10 text-[#014ba0]'
+                  }`}
+                >
+                  Paso 1
+                </span>
               </div>
 
-              <div className="relative mb-8 group">
-                <Search className={`absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 transition-colors ${isDark ? 'text-gray-500' : 'text-gray-400 group-focus-within:text-blue-500'}`} />
-                <input 
-                  type="text" 
-                  placeholder="Buscar área médica..." 
-                  className={`w-full pl-14 pr-6 py-5 rounded-2xl text-lg border-2 outline-none transition-all ${
-                    isDark 
-                      ? 'bg-gray-900/50 border-gray-700 focus:border-blue-500 text-white' 
-                      : 'bg-gray-50 border-gray-100 focus:border-blue-400 focus:bg-white text-[#2E4A70] shadow-inner'
+              <div className="relative mb-3.5">
+                <Search
+                  className={`absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 ${
+                    isDark ? 'text-blue-200/70' : 'text-[#2E4A70]/70'
+                  }`}
+                />
+                <input
+                  type="text"
+                  placeholder="Buscar área médica..."
+                  aria-label="Buscar especialidad médica"
+                  className={`w-full pl-10 pr-4 py-2.5 rounded-xl text-sm border outline-none transition-colors ${
+                    isDark
+                      ? 'bg-[#162235] border-white/15 focus:border-[#24B0BA] text-white placeholder:text-blue-200/50'
+                      : 'bg-[#FFF9F0] border-[#2E4A70]/20 focus:border-[#014ba0] focus:bg-white text-[#1a2639] placeholder:text-[#2E4A70]/55'
                   }`}
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                 />
               </div>
 
-              <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-3 custom-scrollbar">
-                {loading ? (
-                  <div className="flex flex-col items-center justify-center py-20 gap-4">
-                    <Loader2 className="animate-spin text-blue-500 w-10 h-10" />
-                    <p className="text-sm font-bold opacity-40 uppercase tracking-widest">Cargando...</p>
+              {loading ? (
+                <div className="flex items-center justify-center py-8 gap-2.5">
+                  <Loader2 className={`animate-spin w-5 h-5 ${isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'}`} />
+                  <span className={`text-xs font-bold ${isDark ? 'text-blue-200' : 'text-[#2E4A70]'}`}>
+                    Cargando áreas...
+                  </span>
+                </div>
+              ) : filteredCategories.length === 0 ? (
+                <div className={`text-center py-6 text-xs font-semibold ${isDark ? 'text-blue-200/70' : 'text-[#2E4A70]'}`}>
+                  No se encontraron áreas médicas.
+                </div>
+              ) : (
+                <>
+                  {/* Móvil/Tablet: Chips táctiles envolventes que no roban altura vertical */}
+                  <div className="flex flex-wrap gap-2 lg:hidden">
+                    {filteredCategories.map((cat) => {
+                      const isActive = selectedCat?.id === cat.id;
+                      const totalCatCards = catCardCounts[cat.id] || 0;
+                      return (
+                        <button
+                          key={cat.id}
+                          type="button"
+                          onClick={() => handleSelectCategory(cat, true)}
+                          className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                            isActive
+                              ? 'bg-[#014ba0] border-[#014ba0] text-white shadow-sm'
+                              : isDark
+                              ? 'bg-[#162235] border-white/15 text-blue-100 hover:border-[#24B0BA]'
+                              : 'bg-[#FFF9F0] border-[#2E4A70]/20 text-[#1a2639] hover:border-[#014ba0]'
+                          }`}
+                        >
+                          <span>{cat.name}</span>
+                          {totalCatCards > 0 && (
+                            <span
+                              className={`px-1.5 py-0.5 rounded-md text-[10px] font-extrabold tabular-nums ${
+                                isActive
+                                  ? 'bg-white/20 text-white'
+                                  : isDark
+                                  ? 'bg-white/10 text-[#24B0BA]'
+                                  : 'bg-[#014ba0]/10 text-[#014ba0]'
+                              }`}
+                            >
+                              {totalCatCards}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
-                ) : filteredCategories.length === 0 ? (
-                  <div className="text-center py-20 opacity-30 italic font-medium">No se encontraron resultados.</div>
-                ) : filteredCategories.map(cat => (
-                  <div 
-                    key={cat.id}
-                    onClick={() => handleSelectCategory(cat)}
-                    className={`group flex items-center justify-between p-6 rounded-[2rem] cursor-pointer transition-all border-2 ${
-                      selectedCat?.id === cat.id 
-                        ? 'bg-blue-600 border-blue-500 text-white shadow-2xl shadow-blue-600/40 translate-x-2' 
-                        : isDark 
-                          ? 'bg-gray-900/30 border-transparent hover:border-blue-500/50 hover:bg-gray-900/60' 
-                          : 'bg-white border-transparent hover:border-blue-200 hover:shadow-2xl shadow-gray-200/20'
-                    }`}
-                  >
-                    <span className="font-black text-xl">{cat.name}</span>
-                    <div className={`p-2.5 rounded-xl transition-colors ${selectedCat?.id === cat.id ? 'bg-white/20' : 'bg-blue-500/5 group-hover:bg-blue-500 group-hover:text-white'}`}>
-                      <ChevronRight className={`w-6 h-6 transition-transform ${selectedCat?.id === cat.id ? 'rotate-90' : ''}`} />
-                    </div>
+
+                  {/* Desktop: Lista vertical compacta y acotada */}
+                  <div className="hidden lg:block space-y-2 max-h-[420px] overflow-y-auto pr-1 custom-scrollbar">
+                    {filteredCategories.map((cat) => {
+                      const isActive = selectedCat?.id === cat.id;
+                      const totalCatCards = catCardCounts[cat.id] || 0;
+                      return (
+                        <button
+                          key={cat.id}
+                          type="button"
+                          onClick={() => handleSelectCategory(cat, false)}
+                          className={`w-full text-left flex items-center justify-between gap-3 px-4 py-3 rounded-xl border transition-all cursor-pointer ${
+                            isActive
+                              ? 'bg-[#014ba0] border-[#014ba0] text-white shadow-md'
+                              : isDark
+                              ? 'bg-[#162235]/80 border-white/10 text-blue-50 hover:border-[#24B0BA]/60'
+                              : 'bg-[#FFF9F0]/80 border-[#2E4A70]/15 text-[#1a2639] hover:border-[#014ba0]/40 hover:bg-white'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <span className="font-bold text-sm block truncate">{cat.name}</span>
+                            {totalCatCards > 0 && (
+                              <span
+                                className={`text-[11px] font-semibold ${
+                                  isActive
+                                    ? 'text-blue-100'
+                                    : isDark
+                                    ? 'text-blue-200/70'
+                                    : 'text-[#2E4A70]'
+                                }`}
+                              >
+                                {totalCatCards} tarjetas
+                              </span>
+                            )}
+                          </div>
+                          <ChevronRight
+                            className={`w-4 h-4 shrink-0 transition-transform ${
+                              isActive ? 'text-white translate-x-0.5' : isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'
+                            }`}
+                          />
+                        </button>
+                      );
+                    })}
                   </div>
-                ))}
-              </div>
+                </>
+              )}
             </div>
           </div>
 
-          {/* LISTA DE SUBTEMAS */}
-          <div className="lg:col-span-8">
-            <div className={`p-12 rounded-[2rem] shadow-xl border min-h-[650px] flex flex-col transition-all duration-500 ${
-              isDark ? 'bg-gray-800/50 border-gray-700' : 'bg-white border-gray-100 shadow-gray-200/50'
-            }`}>
+          {/* PASO 2: SUBTEMAS / MAZOS DE ESTUDIO */}
+          <div ref={subthemesPanelRef} className="lg:col-span-8">
+            <div
+              className={`p-4 sm:p-6 rounded-2xl sm:rounded-3xl border shadow-sm min-h-[340px] flex flex-col ${
+                isDark ? 'bg-[#1e293b] border-white/10' : 'bg-white border-[#2E4A70]/15'
+              }`}
+            >
               {selectedCat ? (
-                <div className="animate-in fade-in slide-in-from-right-8 duration-500 flex flex-col h-full">
-                  <div className="mb-12">
-                    <div className="flex items-center gap-3 mb-3">
-                      <span className="text-[10px] font-black text-blue-500 uppercase tracking-[0.3em] bg-blue-500/10 px-4 py-1.5 rounded-full">Área Seleccionada</span>
+                <div className="flex flex-col h-full gap-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-black/10" style={{ borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(46,74,112,0.14)' }}>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span
+                          className={`text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-0.5 rounded-full ${
+                            isDark ? 'bg-[#24B0BA]/20 text-[#24B0BA]' : 'bg-[#014ba0]/10 text-[#014ba0]'
+                          }`}
+                        >
+                          Paso 2 · Área Seleccionada
+                        </span>
+                        {!loadingSub && (
+                          <span className={`text-xs font-bold ${isDark ? 'text-blue-200' : 'text-[#2E4A70]'}`}>
+                            {subthemes.length} {subthemes.length === 1 ? 'tema' : 'temas'}
+                          </span>
+                        )}
+                      </div>
+                      <h3 className={`text-xl sm:text-3xl font-black tracking-tight truncate ${isDark ? 'text-white' : 'text-[#1a2639]'}`}>
+                        {selectedCat.name}
+                      </h3>
                     </div>
-                    <h3 className={`text-5xl font-black tracking-tight leading-none mb-4 ${isDark ? 'text-white' : 'text-[#2E4A70]'}`}>{selectedCat.name}</h3>
-                    <p className="text-xl opacity-50 font-medium italic">Elige un identificador de estudio para comenzar tu sesión.</p>
+
+                    {subthemes.length > 4 && (
+                      <div className="relative w-full sm:w-56 shrink-0">
+                        <Search
+                          className={`absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 ${
+                            isDark ? 'text-blue-200/70' : 'text-[#2E4A70]/70'
+                          }`}
+                        />
+                        <input
+                          type="text"
+                          value={subthemeSearch}
+                          onChange={(e) => setSubthemeSearch(e.target.value)}
+                          placeholder="Filtrar subtema..."
+                          aria-label="Filtrar subtemas"
+                          className={`w-full pl-8 pr-3 py-2 rounded-xl text-xs border outline-none ${
+                            isDark
+                              ? 'bg-[#162235] border-white/15 focus:border-[#24B0BA] text-white placeholder:text-blue-200/50'
+                              : 'bg-[#FFF9F0] border-[#2E4A70]/20 focus:border-[#014ba0] focus:bg-white text-[#1a2639]'
+                          }`}
+                        />
+                      </div>
+                    )}
                   </div>
 
                   {loadingSub ? (
-                    <div className="flex-grow flex flex-col items-center justify-center py-20 gap-4">
-                      <Loader2 className="animate-spin text-blue-500 w-16 h-16" />
-                      <p className="font-black text-sm uppercase tracking-widest opacity-40">Sincronizando banco de datos...</p>
+                    <div className="flex-grow flex flex-col items-center justify-center py-14 gap-3">
+                      <Loader2 className={`animate-spin w-9 h-9 ${isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'}`} />
+                      <p className={`font-bold text-xs uppercase tracking-wider ${isDark ? 'text-blue-200' : 'text-[#2E4A70]'}`}>
+                        Cargando temas...
+                      </p>
                     </div>
-                  ) : subthemes.length === 0 ? (
-                    <div className="flex-grow flex flex-col items-center justify-center opacity-20 text-center py-20">
-                      <Layers className="w-24 h-24 mb-6" />
-                      <p className="text-3xl font-black uppercase tracking-tighter">Sin temas registrados</p>
+                  ) : filteredSubthemes.length === 0 ? (
+                    <div className="flex-grow flex flex-col items-center justify-center text-center py-12">
+                      <Layers className={`w-12 h-12 mb-3 opacity-40 ${isDark ? 'text-blue-200' : 'text-[#2E4A70]'}`} />
+                      <p className={`text-base font-bold ${isDark ? 'text-blue-100' : 'text-[#1a2639]'}`}>
+                        {subthemes.length === 0 ? 'Sin temas registrados en esta área' : 'Ningún subtema coincide con la búsqueda'}
+                      </p>
                     </div>
                   ) : (
-                    <div className="flex flex-wrap gap-4 pb-6 overflow-y-auto max-h-[60vh] pr-4 custom-scrollbar">
-                      {subthemes.map(sub => (
-                        <div 
-                          key={sub.id}
-                          onClick={() => startStudy(sub.name)}
-                          className={`flex-grow sm:flex-grow-0 basis-full sm:basis-[calc(50%-1rem)] lg:basis-[calc(33.33%-1rem)] flex flex-col p-6 rounded-[2rem] border-2 text-left transition-all hover:scale-[1.03] active:scale-95 group relative overflow-hidden h-fit cursor-pointer ${
-                            isDark 
-                              ? 'bg-gray-900/40 border-gray-700 hover:border-blue-500 hover:shadow-2xl shadow-blue-500/10' 
-                              : 'bg-gray-50 border-gray-100 hover:border-blue-400 hover:bg-white hover:shadow-2xl shadow-blue-100/10'
-                          }`}
-                        >
-                          <div className="flex items-start justify-between w-full mb-6 relative z-10">
-                            <div className={`p-4 rounded-2xl shadow-lg transition-all duration-300 ${
-                              isDark ? 'bg-gray-800' : 'bg-white'
-                            } group-hover:bg-blue-600 group-hover:text-white group-hover:rotate-12`}>
-                              <GraduationCap className="w-8 h-8" />
-                            </div>
-                            <div className="flex items-center gap-2 font-black text-[10px] text-blue-500 bg-blue-500/10 px-4 py-2 rounded-full opacity-0 group-hover:opacity-100 transition-all translate-y-[-10px] group-hover:translate-y-0">
-                              ESTUDIAR <ArrowRightCircle className="w-4 h-4" />
-                            </div>
-                          </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5">
+                      {filteredSubthemes.map((sub) => {
+                        const cleanName = sub.name?.trim();
+                        const masteredCount = masteredCounts[cleanName] || 0;
+                        const isOpening = openingSubtheme === sub.name;
+                        return (
+                          <div
+                            key={sub.id}
+                            onClick={() => startStudy(sub.name)}
+                            role="button"
+                            tabIndex={0}
+                            aria-busy={isOpening}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                startStudy(sub.name);
+                              }
+                            }}
+                            className={`group flex flex-col justify-between p-4 rounded-2xl border transition-all cursor-pointer ${
+                              isOpening ? 'opacity-85 pointer-events-none scale-[0.99]' : ''
+                            } ${
+                              isDark
+                                ? 'bg-[#162235] border-white/10 hover:border-[#24B0BA] text-white'
+                                : 'bg-[#FFF9F0] border-[#2E4A70]/15 hover:border-[#014ba0] hover:bg-white hover:shadow-md text-[#1a2639]'
+                            }`}
+                          >
+                            <div>
+                              <div className="flex items-start justify-between gap-2 mb-3">
+                                <div
+                                  className={`p-2.5 rounded-xl border ${
+                                    isDark
+                                      ? 'bg-[#2E4A70]/60 border-white/10 text-[#24B0BA]'
+                                      : 'bg-white border-[#2E4A70]/10 text-[#014ba0]'
+                                  }`}
+                                >
+                                  <GraduationCap className="w-5 h-5" />
+                                </div>
 
-                          <div className="relative z-10">
-                            <h4 className="font-black text-xl block leading-snug mb-3 group-hover:text-blue-600 transition-colors whitespace-normal break-words">
-                              {sub.name}
-                            </h4>
-                            <div className="flex items-center justify-between w-full flex-wrap gap-2">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] bg-blue-600 text-white px-3 py-1 rounded-full font-black shadow-lg shadow-blue-500/10">
-                                  {sub.cardCount} TARJETAS
+                                <span className="inline-flex items-center gap-1 text-[11px] font-extrabold text-[#014ba0] bg-[#014ba0]/10 px-2.5 py-1 rounded-full" style={isDark ? { backgroundColor: 'rgba(36,176,186,0.18)', color: '#24B0BA' } : undefined}>
+                                  {isOpening ? (
+                                    <>
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      <span>Abriendo...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span>Estudiar</span>
+                                      <ArrowRightCircle className="w-3.5 h-3.5" />
+                                    </>
+                                  )}
                                 </span>
                               </div>
-                              
-                              {/* Botón Restaurar (Solo si hay dominadas) - Refactorizado como Ghost Button */}
-                              {masteredCounts[sub.name?.trim()] > 0 && (
+
+                              <h4 className="font-extrabold text-base leading-snug mb-3 break-words">
+                                {sub.name}
+                              </h4>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2 pt-2 border-t" style={{ borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(46,74,112,0.1)' }}>
+                              <span className="text-[11px] bg-[#014ba0] text-white px-2.5 py-1 rounded-full font-bold tabular-nums">
+                                {sub.cardCount} {sub.cardCount === 1 ? 'tarjeta' : 'tarjetas'}
+                              </span>
+
+                              {masteredCount > 0 && (
                                 <button
-                                  onClick={(e) => handleRestore(e, sub.name.trim())}
-                                  className={`flex items-center gap-2 px-4 py-1.5 rounded-full border-2 transition-all hover:scale-105 active:scale-95 z-20 font-black text-[9px] uppercase tracking-tighter ${
-                                    isDark 
-                                      ? 'border-gray-700 bg-transparent text-gray-400 hover:border-blue-500 hover:text-white' 
-                                      : 'border-gray-200 bg-transparent text-gray-500 hover:border-blue-500 hover:text-blue-600'
+                                  type="button"
+                                  onClick={(e) => handleRestore(e, cleanName)}
+                                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-bold transition-colors cursor-pointer ${
+                                    isDark
+                                      ? 'border-white/15 text-blue-200 hover:border-[#24B0BA] hover:text-white'
+                                      : 'border-[#2E4A70]/25 bg-white text-[#2E4A70] hover:border-[#014ba0] hover:text-[#014ba0]'
                                   }`}
                                   title="Restaurar tarjetas dominadas"
                                 >
                                   <RotateCcw className="w-3 h-3" />
-                                  <span>{masteredCounts[sub.name?.trim()]}</span>
+                                  <span>Restaurar ({masteredCount})</span>
                                 </button>
                               )}
                             </div>
                           </div>
-
-                          {/* Decoración de fondo */}
-                          <div className="absolute -bottom-10 -right-10 w-40 h-40 bg-blue-500/5 rounded-full transition-all duration-500 group-hover:scale-150 group-hover:bg-blue-500/10"></div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
               ) : (
-                <div className="flex-grow flex flex-col items-center justify-center text-center opacity-40 animate-pulse">
-                  <div className="w-32 h-32 bg-blue-500/10 rounded-full flex items-center justify-center mb-8 border-4 border-dashed border-blue-500/20">
-                    <Sparkles className="w-16 h-16 text-blue-500" />
+                <div className="flex-grow flex flex-col items-center justify-center text-center py-12">
+                  <div
+                    className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${
+                      isDark ? 'bg-[#24B0BA]/15 text-[#24B0BA]' : 'bg-[#014ba0]/10 text-[#014ba0]'
+                    }`}
+                  >
+                    <Sparkles className="w-8 h-8" />
                   </div>
-                  <p className="text-2xl font-black max-w-xs leading-tight uppercase tracking-tighter text-[#2E4A70]">
-                    Elige una especialidad para desbloquear tus temas
+                  <p className={`text-base font-extrabold max-w-xs ${isDark ? 'text-blue-100' : 'text-[#1a2639]'}`}>
+                    Elige una especialidad para ver sus temas disponibles
                   </p>
                 </div>
               )}
             </div>
           </div>
-        </div>
-
+        </section>
 
         {/* Modal de Radiografía */}
         <CardRadiographyModal 

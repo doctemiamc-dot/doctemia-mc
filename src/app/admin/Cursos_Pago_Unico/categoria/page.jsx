@@ -229,13 +229,13 @@ export default function CategoriasTemasPage() {
   );
 
   return (
-    <div className={`p-4 sm:p-8 min-h-screen transition-colors duration-300 ${isDark ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`p-4 sm:p-8 min-h-[calc(100vh-4rem)] transition-colors duration-300 ${isDark ? 'bg-[#1a2639] text-white' : 'bg-[#FFF9F0] text-[#1a2639]'}`}>
       <div className="max-w-7xl mx-auto">
         <header className="mb-8">
-          <h1 className="text-3xl font-bold flex items-center gap-3" style={{ color: isDark ? '#60a5fa' : '#1e40af' }}>
+          <h1 className="text-3xl font-bold flex items-center gap-3" style={{ color: isDark ? '#24B0BA' : '#014ba0' }}>
             <Layers className="w-8 h-8" /> Gestión de Especialidades y Temas
           </h1>
-          <p className={`mt-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+          <p className={`mt-2 ${isDark ? 'text-blue-200/80' : 'text-[#2E4A70]'}`}>
             Organiza las especialidades médicas y sus respectivos temas para el banco de preguntas y flashcards.
           </p>
         </header>
@@ -244,7 +244,7 @@ export default function CategoriasTemasPage() {
           
           {/* COLUMNA IZQUIERDA: ESPECIALIDADES */}
           <div className="lg:col-span-4 space-y-4">
-            <div className={`p-4 rounded-2xl shadow-sm border ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+            <div className={`p-4 rounded-2xl shadow-sm border ${isDark ? 'bg-[#1e293b] border-white/10' : 'bg-white border-[#2E4A70]/15'}`}>
               <div className="flex items-center justify-between mb-4">
                 <h2 className="font-bold text-lg flex items-center gap-2">
                   <BookOpen className="w-5 h-5 text-blue-500" /> Especialidades
@@ -316,7 +316,7 @@ export default function CategoriasTemasPage() {
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button 
                         onClick={(e) => { e.stopPropagation(); setEditingItem({ ...cat, type: 'cat' }); setNewCatName(cat.name); }}
-                        className={`p-1 rounded-md ${selectedCat?.id === cat.id ? 'hover:bg-blue-500' : 'hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-400'}`}
+                        className={`p-1 rounded-md ${selectedCat?.id === cat.id ? 'hover:bg-blue-500' : isDark ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-200 text-gray-500'}`}
                       >
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
@@ -336,7 +336,7 @@ export default function CategoriasTemasPage() {
 
           {/* COLUMNA DERECHA: TEMAS (SUBCATEGORÍAS) */}
           <div className="lg:col-span-8 space-y-4">
-            <div className={`p-6 rounded-2xl shadow-sm border min-h-[400px] ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+            <div className={`p-6 rounded-2xl shadow-sm border min-h-[400px] ${isDark ? 'bg-[#1e293b] border-white/10' : 'bg-white border-[#2E4A70]/15'}`}>
               {selectedCat ? (
                 <>
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">

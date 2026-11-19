@@ -8,8 +8,8 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #111827;
-    --foreground: #f9fafb;
+    --background: #060A13;
+    --foreground: #F1F5F9;
   }
 }
 
@@ -18,38 +18,179 @@ html {
   color-scheme: light dark;
 }
 
-/* Transiciones suaves para el cambio de tema */
-* {
-  transition-property: background-color, border-color, color, fill, stroke;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 200ms;
-}
-
 /* Estilos base para el body */
 body {
   background-color: var(--background);
   color: var(--foreground);
 }
 
-/* Estilos para el scrollbar en modo oscuro */
+/* === MIDNIGHT CLINICAL DARK THEME (solo activo bajo html.dark; el modo claro queda intacto) === */
+html.dark {
+  --background: #060A13;
+  --foreground: #F1F5F9;
+  --dm-canvas: #060A13;
+  --dm-chrome: #121E34;
+  --dm-surface: #152238;
+  --dm-surface-elevated: #1C2C47;
+  --dm-surface-inset: #0A111F;
+  --dm-border: rgba(148, 163, 184, 0.16);
+  --dm-border-strong: rgba(148, 163, 184, 0.24);
+  --dm-text: #F1F5F9;
+  --dm-text-muted: #CBD5E1;
+  --dm-text-subtle: #8FA2BC;
+  --dm-accent: #24B0BA;
+  --dm-gold: #CF8A40;
+}
+
+html.dark body {
+  background-color: var(--dm-canvas);
+  color: var(--dm-text);
+}
+
+html.dark ::selection {
+  background-color: rgba(36, 176, 186, 0.35);
+  color: #f8fafc;
+}
+
+/* Nivel 0: Lienzos base */
+html.dark .bg-\[\#1a2639\],
+html.dark .bg-gray-900,
+html.dark .bg-slate-950,
+html.dark .bg-\[\#0f172a\] {
+  background-color: var(--dm-canvas);
+}
+
+html.dark .bg-\[\#1a2639\]\/60 {
+  background-color: rgba(6, 10, 19, 0.72);
+}
+
+html.dark .bg-slate-950\/75 {
+  background-color: rgba(6, 10, 19, 0.80);
+}
+
+html.dark .bg-slate-950\/85 {
+  background-color: rgba(6, 10, 19, 0.90);
+}
+
+/* Nivel 1: Overlays elevados y superficies internas oscuras */
+html.dark .bg-slate-900 {
+  background-color: var(--dm-surface-inset);
+}
+
+html.dark .bg-slate-900\/95,
+html.dark .bg-slate-900\/90,
+html.dark .bg-gray-900\/95 {
+  background-color: rgba(18, 30, 52, 0.95);
+}
+
+/* Nivel 2: Tarjetas y paneles principales */
+html.dark .bg-\[\#1e293b\],
+html.dark .bg-gray-800,
+html.dark .bg-slate-800 {
+  background-color: var(--dm-surface);
+}
+
+html.dark .bg-\[\#1e293b\]\/95,
+html.dark .bg-gray-800\/95,
+html.dark .bg-slate-800\/95 {
+  background-color: rgba(21, 34, 56, 0.95);
+}
+
+html.dark .bg-gray-800\/80,
+html.dark .bg-slate-800\/80,
+html.dark .bg-gray-800\/70,
+html.dark .bg-slate-800\/70,
+html.dark .bg-gray-800\/50,
+html.dark .bg-gray-800\/40 {
+  background-color: rgba(21, 34, 56, 0.74);
+}
+
+/* Nivel 2b: Superficies internas / inputs */
+html.dark .bg-\[\#162235\] {
+  background-color: var(--dm-surface-inset);
+}
+
+html.dark .bg-\[\#162235\]\/85,
+html.dark .bg-\[\#162235\]\/80,
+html.dark .bg-\[\#162235\]\/65,
+html.dark .bg-\[\#162235\]\/60,
+html.dark .bg-\[\#162235\]\/55,
+html.dark .bg-\[\#162235\]\/50,
+html.dark .bg-gray-900\/70,
+html.dark .bg-gray-900\/60,
+html.dark .bg-gray-900\/50,
+html.dark .bg-gray-900\/40,
+html.dark .bg-gray-900\/35,
+html.dark .bg-gray-900\/30,
+html.dark .bg-slate-900\/70,
+html.dark .bg-slate-900\/65,
+html.dark .bg-slate-900\/60,
+html.dark .bg-slate-900\/55,
+html.dark .bg-slate-900\/50 {
+  background-color: rgba(10, 17, 31, 0.78);
+}
+
+/* Nivel 3: Elementos elevados y estados hover */
+html.dark .bg-gray-700,
+html.dark .bg-slate-700 {
+  background-color: var(--dm-surface-elevated);
+}
+
+html.dark .bg-gray-700\/80,
+html.dark .bg-gray-700\/70,
+html.dark .bg-gray-700\/60,
+html.dark .bg-gray-700\/50,
+html.dark .bg-slate-700\/80,
+html.dark .bg-slate-700\/70 {
+  background-color: rgba(28, 44, 71, 0.74);
+}
+
+html.dark .hover\:bg-gray-700:hover,
+html.dark .hover\:bg-slate-700:hover,
+html.dark .hover\:bg-gray-600:hover,
+html.dark .hover\:bg-slate-800:hover,
+html.dark .hover\:bg-gray-700\/60:hover {
+  background-color: var(--dm-surface-elevated);
+}
+
+/* Bordes y divisores translúcidos refinados */
+html.dark .border-gray-700,
+html.dark .border-slate-700,
+html.dark .border-gray-600,
+html.dark .border-slate-600,
+html.dark .border-\[\#1e293b\],
+html.dark .border-gray-700\/80,
+html.dark .border-slate-700\/80 {
+  border-color: var(--dm-border-strong);
+}
+
+html.dark .border-gray-800,
+html.dark .border-slate-800,
+html.dark .divide-slate-700 > :not(:last-child),
+html.dark .divide-slate-700\/70 > :not(:last-child) {
+  border-color: var(--dm-border);
+}
+
+/* Scrollbar refinado en modo oscuro */
 .dark ::-webkit-scrollbar {
-  width: 8px;
+  width: 7px;
+  height: 7px;
 }
 
 .dark ::-webkit-scrollbar-track {
-  background: #374151;
+  background: #060A13;
 }
 
 .dark ::-webkit-scrollbar-thumb {
-  background: #6b7280;
-  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.24);
+  border-radius: 9999px;
 }
 
 .dark ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: rgba(36, 176, 186, 0.55);
 }
 
-/* Estilos para el scrollbar en modo claro */
+/* Estilos para el scrollbar en modo claro (intactos) */
 ::-webkit-scrollbar {
   width: 8px;
 }
@@ -66,14 +207,3 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #9ca3af;
 }
-
-/* DEBUG - Agregar temporalmente */
-/* .dark header {
-  background-color: #1f2937 !important;
-  color: #f9fafb !important;
-}
-
-header {
-  background-color: #ffffff !important;
-  color: #111827 !important;
-} */

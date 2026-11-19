@@ -4,13 +4,28 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import Swal from 'sweetalert2';
 import { db, auth } from '@/lib/firebase'; // Asegúrate de que db y auth estén importados correctamente
-import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore'; // Importar serverTimestamp
+import { doc, updateDoc } from 'firebase/firestore';
 import { updatePassword, EmailAuthProvider, reauthenticateWithCredential } from 'firebase/auth';
 import { useAuth } from '@/context/AuthContext'; // Para obtener el usuario autenticado
 import { useTheme } from '@/context/ThemeContext'; // Para el tema oscuro/claro
 
-const convertGoogleDriveUrl = (url) => {
-  if (!url) return '/icons/user.jpg';
+const getDefaultAvatarUrl = (isDark = false) =>
+  isDark ? '/images/gallooscuro-avatar.webp' : '/images/galloclaro-avatar.webp';
+
+const isDefaultOrLegacyAvatar = (url) => {
+  if (!url) return true;
+  const normalized = String(url).trim();
+  return (
+    normalized === '' ||
+    normalized === '/icons/user.jpg' ||
+    normalized === '/icons/user.png' ||
+    normalized === '/images/galloclaro-avatar.webp' ||
+    normalized === '/images/gallooscuro-avatar.webp'
+  );
+};
+
+const convertGoogleDriveUrl = (url, isDark = false) => {
+  if (isDefaultOrLegacyAvatar(url)) return getDefaultAvatarUrl(isDark);
   
   // Si ya es una URL de visualización directa, la devolvemos tal como está
   if (url.includes('drive.google.com/uc?') || url.includes('drive.google.com/thumbnail?')) {
@@ -55,75 +70,42 @@ export default function AdminEditProfilePage() {
   }), [isDark]);
 
   useEffect(() => {
-    // Solo cargar datos si el usuario autenticado es un admin y los datos aún no están cargados
-    if (authUser && authUser.role === 'admin' && loading) {
-      const fetchAdminProfile = async () => {
-        try {
-          // Asumimos que los datos del admin están en el documento de usuario con su UID
-          // Si el admin tiene un documento fijo (ej. 'admin_profile'), ajusta la ruta
-          const adminDocRef = doc(db, 'users', authUser.uid);
-          const docSnap = await getDoc(adminDocRef);
-
-          if (docSnap.exists()) {
-            const data = docSnap.data();
-            setForm({
-              name: data.name || '',
-              email: authUser.email || '', // El email de Auth es la fuente de verdad y no es editable
-              photoURL: data.photoURL || '',
-              role: data.role || 'admin', // El rol del admin no es editable
-              password: '', // Siempre vacío al cargar
-            });
-            setImagePreview(data.photoURL || ''); // Establecer vista previa inicial
-          } else {
-            // Si el documento de admin no existe en Firestore, podemos inicializar con datos de Auth
-            setForm({
-              name: authUser.displayName || '',
-              email: authUser.email || '',
-              photoURL: authUser.photoURL || '',
-              role: authUser.role || 'admin',
-              password: '',
-            });
-            setImagePreview(authUser.photoURL || '');
-            // Opcional: Crear el documento si no existe
-            await updateDoc(adminDocRef, {
-              name: authUser.displayName || '',
-              email: authUser.email,
-              photoURL: authUser.photoURL || '',
-              role: authUser.role || 'admin',
-              createdAt: serverTimestamp(),
-            }, { merge: true }); // Usar merge para no sobrescribir otros campos
-          }
-        } catch (error) {
-          console.error('Error cargando perfil de admin:', error);
-          Swal.fire({ title: 'Error', text: 'No se pudo cargar el perfil del administrador.', icon: 'error', ...swalTheme });
-        } finally {
-          setLoading(false);
-        }
-      };
-      fetchAdminProfile();
-    } else if (!authUser || authUser.role !== 'admin') {
-      // Si no hay usuario autenticado o no es admin, redirigir
-      router.push('/login'); // O a una página de acceso denegado
+    // Reutilizar el documento de usuario ya sincronizado por AuthContext (0 lecturas extra)
+    if (authUser && (authUser.role === 'admin' || authUser.rol === 'admin') && loading) {
+      const initialPhoto = isDefaultOrLegacyAvatar(authUser.photoURL)
+        ? getDefaultAvatarUrl(isDark)
+        : authUser.photoURL;
+      setForm({
+        name: authUser.name || authUser.displayName || '',
+        email: authUser.email || '',
+        photoURL: initialPhoto,
+        role: authUser.role || authUser.rol || 'admin',
+        password: '',
+      });
+      setImagePreview(initialPhoto);
+      setLoading(false);
+    } else if (!authUser || (authUser.role !== 'admin' && authUser.rol !== 'admin')) {
+      router.push('/login');
     }
-  }, [authUser, loading, router, swalTheme]);
+  }, [authUser, loading, router, isDark]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
     setForm(prev => ({ ...prev, [name]: value }));
     if (name === 'photoURL') {
-      setImagePreview(convertGoogleDriveUrl(value)); // Convertir URL de Google Drive
+      setImagePreview(convertGoogleDriveUrl(value, isDark)); // Convertir URL de Google Drive
       setImageError(false); // Resetear error al cambiar URL
     }
   };
 
   const handleImageError = () => {
     setImageError(true);
-    setImagePreview('/placeholder-image.jpg'); // Mostrar una imagen de placeholder si falla
+    setImagePreview(getDefaultAvatarUrl(isDark));
   };
 
   // ✅ NUEVA FUNCIÓN: Usar imagen por defecto
   const handleUseDefaultImage = () => {
-    const defaultImageUrl = '/icons/user.jpg';
+    const defaultImageUrl = getDefaultAvatarUrl(isDark);
     setForm(prev => ({ ...prev, photoURL: defaultImageUrl }));
     setImagePreview(defaultImageUrl);
     setImageError(false); // Limpiar cualquier error de imagen anterior
@@ -306,9 +288,11 @@ export default function AdminEditProfilePage() {
                 <div className="mt-2 text-center">
                   <p className="text-sm mb-1" style={labelStyle}>Vista Previa:</p>
                   <img 
-                    src={convertGoogleDriveUrl(imagePreview)} 
+                    src={convertGoogleDriveUrl(imagePreview, isDark)} 
                     alt="Vista previa de la foto de perfil" 
-                    className="w-32 h-32 object-cover rounded-full mx-auto border-2" 
+                    width={128}
+                    height={128}
+                    className={`w-32 h-32 mx-auto rounded-full border-2 ${isDefaultOrLegacyAvatar(imagePreview) ? 'object-contain p-1' : 'object-cover'}`} 
                     style={{borderColor: isDark ? '#374151' : '#d1d5db'}}
                     onError={handleImageError} // Manejar error de carga de imagen
                   />

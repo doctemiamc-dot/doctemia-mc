@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { auth, db } from '@/lib/firebase-admin';
+import { buildExpirationFields } from '@/lib/accountExpiration';
+import { invalidateUsersSearchCache } from '@/lib/usersSearchCache';
 
 export async function POST(request) {
   let createdUserRecord = null;
@@ -21,6 +23,10 @@ export async function POST(request) {
       email,
       password,
       rol,
+      durationType,
+      activeDurationMonths,
+      exactDate,
+      activeUntil,
     } = body;
 
     // Normalizar email
@@ -43,7 +49,25 @@ export async function POST(request) {
       }
     }
 
-    // 2. Graba los datos adicionales del usuario en Firestore
+    // 2. Calcular vigencia de la cuenta (por defecto 3 meses para usuarios nuevos)
+    let expirationFields;
+    if (rol === 'admin') {
+      expirationFields = { activeDurationMonths: null, activeFrom: null, activeUntil: null };
+    } else if (activeUntil !== undefined) {
+      expirationFields = {
+        activeDurationMonths: activeDurationMonths ?? null,
+        activeFrom: activeUntil ? new Date().toISOString() : null,
+        activeUntil: activeUntil || null,
+      };
+    } else {
+      expirationFields = buildExpirationFields({
+        durationType: durationType || 'months',
+        activeDurationMonths: activeDurationMonths ?? 3,
+        exactDate: exactDate || '',
+      });
+    }
+
+    // 3. Graba los datos adicionales del usuario en Firestore
     try {
       await db
         .collection('users')
@@ -63,10 +87,16 @@ export async function POST(request) {
           fechaSuscripcion: '-',
           fechaVencimiento: '-',
           hasPagoUnicoAccess: false,
+          activeDurationMonths: expirationFields.activeDurationMonths,
+          activeFrom: expirationFields.activeFrom || null,
+          activeUntil: expirationFields.activeUntil,
+          expiredAt: null,
+          deactivatedReason: null,
           createdAt: new Date().toISOString(),
           mesesSuscrito: 0,
         });
-        
+
+      invalidateUsersSearchCache();
       return NextResponse.json({ ok: true }, { status: 201 });
 
     } catch (firestoreError) {

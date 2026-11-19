@@ -1,9 +1,14 @@
 'use client';
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, getDocs, query, where, doc, getDoc, onSnapshot, addDoc, serverTimestamp, updateDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { collection, getDocs, query, where, limit, addDoc, serverTimestamp } from 'firebase/firestore';
 import { useAuth } from '@/context/AuthContext';
 import { useTheme } from '@/context/ThemeContext';
+import {
+  getCachedContactInfo,
+  getCachedPendingAccessRequest,
+  setCachedPendingAccessRequest,
+} from '@/lib/catalogCache';
 import Swal from 'sweetalert2';
 import { LockKeyhole, Send, Hourglass, BookOpen, Search, CheckCircle2, Bookmark } from 'lucide-react';
 import Link from 'next/link';
@@ -23,22 +28,17 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
     
     useEffect(() => {
         const checkRequestAndLoadInfo = async () => {
-            if (user) {
-                const q = query(collection(db, "pagoUnico_solicitudes"), where("userId", "==", user.uid), where("status", "==", "pendiente"));
-                const querySnapshot = await getDocs(q);
-                if (!querySnapshot.empty) {
-                    setRequestSent(true);
-                }
-            }
-            // ✅ CAMBIO: Obtener infoContacto que incluye qrUrl, adminPhone y businessName
-            const contactInfoRef = doc(db, 'pags', 'infoContacto');
-            const docSnap = await getDoc(contactInfoRef);
-            if (docSnap.exists()) {
-                setContactInfo(prev => ({ ...prev, ...docSnap.data() })); // Fusionar datos existentes con los de Firebase
+            if (user?.uid) {
+                const [hasPending, info] = await Promise.all([
+                    getCachedPendingAccessRequest(user.uid),
+                    getCachedContactInfo(),
+                ]);
+                if (hasPending) setRequestSent(true);
+                if (info) setContactInfo(prev => ({ ...prev, ...info }));
             }
         };
         checkRequestAndLoadInfo();
-    }, [user]);
+    }, [user?.uid]);
 
     const handleRequestAccessPopup = () => {
         Swal.fire({
@@ -78,6 +78,7 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
                 try {
                     await addDoc(collection(db, "pagoUnico_solicitudes"), { userId: user.uid, userName: user.name || user.displayName || user.email, userEmail: user.email, userPhone: result.value.phone, requestDate: serverTimestamp(), status: 'pendiente', type: 'pago_unico_access' });
                     setRequestSent(true);
+                    setCachedPendingAccessRequest(user.uid, true);
                     Swal.fire({ title: '¡Solicitud Enviada!', text: 'Te contactaremos pronto.', icon: 'success', ...swalTheme });
                 } catch (error) {
                     console.error("Error al crear solicitud:", error);
@@ -121,42 +122,38 @@ export default function UserListCoursesPage() {
   const [contactInfo, setContactInfo] = useState({ qrUrl: '', adminPhone: '', businessName: 'DOCTEMIA MC' }); 
 
   useEffect(() => {
-    if (!user) {
+    if (!user?.uid) {
       setLoading(false);
       return;
     }
 
     const fetchData = async () => {
       try {
-        // Obtener el teléfono del usuario
-        const userDoc = await getDoc(doc(db, 'users', user.uid));
-        if (userDoc.exists()) {
-          setUserPhone(userDoc.data().telefono || '');
+        // Reutilizar teléfono desde user de AuthContext y contactInfo cacheado (0 lecturas extra)
+        setUserPhone(user.telefono || '');
+
+        const [info, coursesSnapshot, solicitudesSnapshot] = await Promise.all([
+          getCachedContactInfo(),
+          getDocs(query(collection(db, 'courses'), where('isActive', '==', true), limit(50))),
+          getDocs(query(collection(db, 'solicitudes'), where('userId', '==', user.uid), limit(50))),
+        ]);
+
+        if (info) {
+          setContactInfo((prev) => ({ ...prev, ...info }));
         }
 
-        // ✅ CAMBIO: Obtener infoContacto (QR y adminPhone) del documento 'infoContacto'
-        const contactInfoRef = doc(db, 'pags', 'infoContacto');
-        const contactDoc = await getDoc(contactInfoRef);
-        if (contactDoc.exists()) {
-          setContactInfo(contactDoc.data());
-        }
-
-        const coursesSnapshot = await getDocs(collection(db, 'courses'));
-        const allCourses = coursesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        const activeCourses = allCourses.filter(course => course.isActive);
-
-        const solicitudesSnapshot = await getDocs(
-          query(collection(db, 'solicitudes'), where('userId', '==', user.uid))
-        );
-        const userSolicitudes = solicitudesSnapshot.docs.map(doc => doc.data());
-        const pendingCourseIds = userSolicitudes.map(solicitud => solicitud.courseId);
+        const activeCourses = coursesSnapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const userSolicitudes = solicitudesSnapshot.docs.map((d) => d.data());
+        const pendingCourseIds = userSolicitudes.map((solicitud) => solicitud.courseId);
 
         const filteredCourses = activeCourses.filter(
-          course => !user.cursosPagados?.some(p => p.idCurso === course.id)
+          (course) => !user.cursosPagados?.some((p) => p.idCurso === course.id)
         );
 
-        setPendingCourses(filteredCourses.filter(course => pendingCourseIds.includes(course.id)));
-        setAvailableCourses(filteredCourses.filter(course => !pendingCourseIds.includes(course.id)));
+        setPendingCourses(filteredCourses.filter((course) => pendingCourseIds.includes(course.id)));
+        setAvailableCourses(
+          filteredCourses.filter((course) => !pendingCourseIds.includes(course.id))
+        );
       } catch (error) {
         console.error('Error loading courses or solicitudes:', error);
         Swal.fire('Error', 'No se pudieron cargar los cursos.', 'error');
@@ -166,7 +163,7 @@ export default function UserListCoursesPage() {
     };
 
     fetchData();
-  }, [user]);
+  }, [user?.uid, user?.telefono, user?.cursosPagados]);
 
   const handleOpenPurchaseModal = course => {
     setSelectedCourseForPurchase(course);

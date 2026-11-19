@@ -1,11 +1,35 @@
 'use client';
-import { createContext, useState, useEffect, useContext, useCallback } from 'react';
+import { createContext, useState, useEffect, useContext, useCallback, useRef } from 'react';
 import { auth, db } from '@/lib/firebase';
-import { onAuthStateChanged, getIdTokenResult, signOut as fbSignOut } from 'firebase/auth';
+import { onAuthStateChanged, onIdTokenChanged, getIdTokenResult, signOut as fbSignOut } from 'firebase/auth';
 import { doc, onSnapshot, getDoc, setDoc, serverTimestamp } from 'firebase/firestore'; // Importar setDoc y serverTimestamp
 import { useRouter } from 'next/navigation';
+import { isAccountExpired, parseExpirationMs } from '@/lib/accountExpiration';
 
 const AuthContext = createContext();
+const SYNCED_TOKEN_STORAGE_KEY = '__doctemia_synced_id_token';
+
+function getStoredSyncedToken() {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.sessionStorage.getItem(SYNCED_TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setStoredSyncedToken(token) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (token) {
+      window.sessionStorage.setItem(SYNCED_TOKEN_STORAGE_KEY, token);
+    } else {
+      window.sessionStorage.removeItem(SYNCED_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignorar errores de sessionStorage
+  }
+}
 
 export function AuthProvider({ children }) {
   const router = useRouter();
@@ -13,59 +37,112 @@ export function AuthProvider({ children }) {
   const [role, setRole] = useState(null);
   const [loading, setLoading] = useState(true);
   const [firebaseAuthUser, setFirebaseAuthUser] = useState(null);
+  const isExpiringOutRef = useRef(false);
+  const lastSyncedTokenRef = useRef(null);
+
+  const forceServerLogout = useCallback(async (expired = false) => {
+    if (isExpiringOutRef.current) return;
+    isExpiringOutRef.current = true;
+    try {
+      await fetch('/api/check-expiration', { method: 'POST' }).catch(() => null);
+      await fetch('/api/logout', { method: 'POST' }).catch(() => null);
+      await fbSignOut(auth).catch(() => null);
+    } finally {
+      setUser(null);
+      setRole(null);
+      setStoredSyncedToken(null);
+      setLoading(false);
+      router.replace(expired ? '/login?expired=1' : '/login');
+    }
+  }, [router]);
 
   useEffect(() => {
     setLoading(true);
+    let unsubFirestore = null;
+    let expirationTimer = null;
+
+    const cleanupListeners = () => {
+      if (unsubFirestore) {
+        unsubFirestore();
+        unsubFirestore = null;
+      }
+      if (expirationTimer) {
+        clearTimeout(expirationTimer);
+        expirationTimer = null;
+      }
+    };
+
     const unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
+      cleanupListeners();
       setFirebaseAuthUser(fbUser);
+
       if (fbUser) {
-        console.log('AuthContext: Firebase user detected:', fbUser.uid);
+        isExpiringOutRef.current = false;
         try {
-          const tokenResult = await getIdTokenResult(fbUser, true);
+          // Aprovecha caché válida del token para acelerar la carga inicial de sesión
+          const tokenResult = await getIdTokenResult(fbUser, false);
           const emailFallback = fbUser.email === (process.env.NEXT_PUBLIC_ADMIN_EMAIL || 'admin@admin.com') ? 'admin' : 'user';
           const assignedRole = tokenResult.claims.role || emailFallback;
           setRole(assignedRole);
-          console.log('AuthContext: Role assigned:', assignedRole);
 
           const userDocRef = doc(db, 'users', fbUser.uid);
-          const unsubFirestore = onSnapshot(userDocRef, async (docSnap) => { // Hacemos el callback async
+          unsubFirestore = onSnapshot(userDocRef, async (docSnap) => {
             if (docSnap.exists()) {
-              console.log('AuthContext: Firestore user data received:', docSnap.data());
+              const docData = docSnap.data();
+
+              // Control de vigencia / cuenta desactivada para estudiantes
+              if (assignedRole !== 'admin') {
+                const expired = isAccountExpired(docData);
+                if (docData.active === false || expired) {
+                  await forceServerLogout(expired || docData.deactivatedReason === 'expired');
+                  return;
+                }
+
+                // Programar corte automático si la fecha de vencimiento cae dentro de las próximas 24 horas
+                if (expirationTimer) {
+                  clearTimeout(expirationTimer);
+                  expirationTimer = null;
+                }
+                const expiresAtMs = parseExpirationMs(docData.activeUntil);
+                if (expiresAtMs !== null) {
+                  const msRemaining = expiresAtMs - Date.now();
+                  if (msRemaining > 0 && msRemaining <= 86400000) {
+                    expirationTimer = setTimeout(() => {
+                      forceServerLogout(true);
+                    }, msRemaining + 500);
+                  }
+                }
+              }
+
               setUser({
                 uid: fbUser.uid,
                 email: fbUser.email,
                 displayName: fbUser.displayName,
-                ...docSnap.data()
+                ...docData
               });
               setLoading(false);
             } else {
-              // --- ¡SOLUCIÓN IMPLEMENTADA AQUÍ! ---
-              // Si el documento no existe, lo creamos.
               console.warn(`AuthContext: User document does not exist for uid: ${fbUser.uid}. Creating it now.`);
               
               const newUserProfile = {
                 email: fbUser.email,
                 name: fbUser.displayName || 'Nuevo Usuario',
-                photoURL: fbUser.photoURL || '/icons/user.jpg', // URL de avatar por defecto
-                role: assignedRole, // Usamos el rol de los claims o el fallback
+                photoURL: fbUser.photoURL || '/images/galloclaro-avatar.webp',
+                role: assignedRole,
                 createdAt: serverTimestamp(),
                 isActive: true,
                 subscription: null,
-                cursosPagados: [], // Inicializamos el campo de cursos pagados
+                cursosPagados: [],
               };
 
               try {
-                // Creamos el documento en Firestore
                 await setDoc(userDocRef, newUserProfile);
-                console.log("AuthContext: New user document created successfully in Firestore.");
-                // Establecemos el usuario en el estado local para que la UI reaccione inmediatamente
                 setUser({
                   uid: fbUser.uid,
                   ...newUserProfile
                 });
               } catch (error) {
                 console.error("AuthContext: FAILED to create user document:", error);
-                // Si la creación falla, deslogueamos para evitar un estado inconsistente
                 signOut();
               } finally {
                 setLoading(false);
@@ -77,11 +154,6 @@ export function AuthProvider({ children }) {
             setLoading(false);
           });
 
-          return () => {
-            console.log('AuthContext: Unsubscribing from Firestore user document for', fbUser.uid);
-            unsubFirestore();
-          };
-
         } catch (error) {
           console.error("AuthContext: Error getting token result or setting up Firestore listener:", error);
           setUser(null);
@@ -89,19 +161,45 @@ export function AuthProvider({ children }) {
           setLoading(false);
         }
       } else {
-        console.log('AuthContext: No Firebase user authenticated.');
         setUser(null);
         setRole(null);
         setFirebaseAuthUser(null);
+        lastSyncedTokenRef.current = null;
+        setStoredSyncedToken(null);
         setLoading(false);
       }
     });
 
+    // Sincronizar automáticamente la cookie __session solo cuando Firebase realmente rote el ID token (~1h)
+    const unsubIdToken = onIdTokenChanged(auth, async (fbUser) => {
+      if (!fbUser) {
+        lastSyncedTokenRef.current = null;
+        setStoredSyncedToken(null);
+        return;
+      }
+      try {
+        const freshToken = await fbUser.getIdToken();
+        const storedToken = lastSyncedTokenRef.current || getStoredSyncedToken();
+        if (freshToken && freshToken !== storedToken) {
+          lastSyncedTokenRef.current = freshToken;
+          setStoredSyncedToken(freshToken);
+          await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: freshToken }),
+          }).catch(() => null);
+        }
+      } catch {
+        // Silencioso: si falla el refresco, el próximo intento o re-login lo resolverá
+      }
+    });
+
     return () => {
-      console.log('AuthContext: Unsubscribing from onAuthStateChanged.');
+      cleanupListeners();
       unsubAuth();
+      unsubIdToken();
     };
-  }, []);
+  }, [forceServerLogout]);
 
   const signOut = async () => {
     setLoading(true);
@@ -114,6 +212,7 @@ export function AuthProvider({ children }) {
         console.log('AuthContext: Llamada a /api/logout exitosa.');
       }
       await fbSignOut(auth);
+      setStoredSyncedToken(null);
       console.log('AuthContext: Firebase signOut completado.');
       router.push('/login');
     } catch (error) {

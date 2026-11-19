@@ -1,7 +1,8 @@
 "use client";
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { getCachedCategories, getCachedSubcategories } from '@/lib/catalogCache';
 import { useRouter } from 'next/navigation';
 import { useTheme } from '@/context/ThemeContext';
 import { formatDriveUrl } from '@/lib/driveUtils';
@@ -36,12 +37,7 @@ export default function NewFlashcardPage() {
   useEffect(() => {
     const fetchCategories = async () => {
       try {
-        const querySnapshot = await getDocs(collection(db, 'course_categories'));
-        const categoriesData = querySnapshot.docs.map(doc => ({ 
-          id: doc.id, 
-          ...doc.data() 
-        }));
-        categoriesData.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        const categoriesData = await getCachedCategories();
         setCategories(categoriesData);
         
         if (categoriesData.length > 0) {
@@ -63,10 +59,7 @@ export default function NewFlashcardPage() {
   const fetchSubthemes = async (catId) => {
     setLoadingSubthemes(true);
     try {
-      const subRef = collection(db, 'course_categories', catId, 'subcategories');
-      const querySnapshot = await getDocs(subRef);
-      const subData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      subData.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      const subData = await getCachedSubcategories(catId);
       setSubthemes(subData);
       
       if (subData.length > 0) {

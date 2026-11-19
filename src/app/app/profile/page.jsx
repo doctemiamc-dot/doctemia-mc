@@ -1,148 +1,230 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import Link from 'next/link';
 import { useAuth } from '@/context/AuthContext';
 import { useTheme } from '@/context/ThemeContext';
 import { db, auth } from '@/lib/firebase';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { doc, updateDoc } from 'firebase/firestore';
 import {
   updatePassword,
   EmailAuthProvider,
-  reauthenticateWithCredential
+  reauthenticateWithCredential,
 } from 'firebase/auth';
+import {
+  calculateDurationDays,
+  formatDateShortEs,
+  formatDateTimeBolivia,
+  formatExpirationDisplay,
+  getBoliviaDateParts,
+  isAccountExpired,
+  parseExpirationMs,
+} from '@/lib/accountExpiration';
 import Swal from 'sweetalert2';
-import { User, Lock, Save, Eye, EyeOff, Calendar, Phone, Building, Briefcase, GraduationCap, UserCheck } from 'lucide-react';
+import { toast, Toaster } from 'react-hot-toast';
+import {
+  User,
+  Lock,
+  Save,
+  Eye,
+  EyeOff,
+  Calendar,
+  Phone,
+  Building,
+  Briefcase,
+  GraduationCap,
+  UserCheck,
+  Mail,
+  ShieldCheck,
+  CheckCircle2,
+  AlertCircle,
+  RotateCcw,
+  BookOpen,
+  CalendarClock,
+  Loader2,
+} from 'lucide-react';
 
-// Paleta de colores
-const COLORS = {
-  primary: '#014ba0',      // Turquesa principal
-  secondary: '#014ba0',    // Azul oscuro
-  accent: '#CF8A40',       // Naranja/Dorado
-  dark: '#2E4A70',         // Azul oscuro
-  neutral: '#F0F2F2',      // Gris claro
-  background: '#FFF9F0'    // Fondo crema
+const EMPTY_PROFILE = {
+  fullName: '',
+  fechaNacimiento: '',
+  sexo: '',
+  telefono: '',
+  universidad: '',
+  profesion: '',
+  fechaExamen: '',
 };
 
+function toInputDateString(value) {
+  if (!value) return '';
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString().split('T')[0];
+  }
+  if (typeof value?.toDate === 'function') {
+    const d = value.toDate();
+    return Number.isNaN(d.getTime()) ? '' : d.toISOString().split('T')[0];
+  }
+  if (typeof value?.seconds === 'number') {
+    const d = new Date(value.seconds * 1000);
+    return Number.isNaN(d.getTime()) ? '' : d.toISOString().split('T')[0];
+  }
+  return '';
+}
+
+function extractProfileSnapshot(user) {
+  if (!user) return { ...EMPTY_PROFILE };
+  return {
+    fullName: (user.fullName || user.name || user.displayName || '').trim(),
+    fechaNacimiento: toInputDateString(user.fechaNacimiento),
+    sexo: user.sexo || '',
+    telefono: user.telefono || '',
+    universidad: user.universidad || '',
+    profesion: user.profesion || '',
+    fechaExamen: toInputDateString(user.fechaExamen),
+  };
+}
+
+function getExamCountdown(fechaExamenStr) {
+  if (!fechaExamenStr || !/^\d{4}-\d{2}-\d{2}$/.test(fechaExamenStr)) return null;
+  const todayParts = getBoliviaDateParts(new Date());
+  if (!todayParts?.dateStr) return null;
+
+  const targetMs = Date.parse(`${fechaExamenStr}T00:00:00Z`);
+  const todayMs = Date.parse(`${todayParts.dateStr}T00:00:00Z`);
+  if (!Number.isFinite(targetMs) || !Number.isFinite(todayMs)) return null;
+
+  const daysDiff = Math.round((targetMs - todayMs) / 86400000);
+  const [y, m, d] = fechaExamenStr.split('-').map(Number);
+  const formattedDate = new Date(Date.UTC(y, m - 1, d, 12, 0, 0)).toLocaleDateString('es-ES', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+
+  return {
+    daysDiff,
+    formattedDate,
+    status: daysDiff > 0 ? 'upcoming' : daysDiff === 0 ? 'today' : 'past',
+  };
+}
+
 export default function ProfilePage() {
-  const { user, refreshUserData } = useAuth();
-  const { isDark } = useTheme();
-  const [profileData, setProfileData] = useState({
-    fullName: '',
-    fechaNacimiento: '',
-    sexo: '',
-    telefono: '',
-    universidad: '',
-    profesion: '',
-    fechaExamen: '' // <-- NUEVO CAMPO AÑADIDO AL ESTADO
-  });
+  const { user, role } = useAuth();
+  const { isDark, isLoaded } = useTheme();
+
+  const [activeTab, setActiveTab] = useState('personal'); // 'personal' | 'security'
+  const [profileData, setProfileData] = useState(EMPTY_PROFILE);
+  const [initialLoaded, setInitialLoaded] = useState(false);
+  const loadedUidRef = useRef(null);
+
   const [passwordData, setPasswordData] = useState({
-    currentPassword: '',
     newPassword: '',
-    confirmNewPassword: ''
+    confirmNewPassword: '',
   });
+  const [showPasswords, setShowPasswords] = useState({
+    new: false,
+    confirm: false,
+  });
+
   const [loadingProfile, setLoadingProfile] = useState(false);
   const [loadingPassword, setLoadingPassword] = useState(false);
-  const [initialLoaded, setInitialLoaded] = useState(false);
-  const [showPasswords, setShowPasswords] = useState({
-    current: false,
-    new: false,
-    confirm: false
-  });
+
+  const savedSnapshot = useMemo(() => extractProfileSnapshot(user), [user]);
 
   useEffect(() => {
-    if (!user || initialLoaded) return;
+    if (!user?.uid) {
+      loadedUidRef.current = null;
+      setInitialLoaded(false);
+      return;
+    }
+    if (loadedUidRef.current !== user.uid) {
+      loadedUidRef.current = user.uid;
+      setProfileData(savedSnapshot);
+      setInitialLoaded(true);
+    }
+  }, [user?.uid, savedSnapshot]);
 
-    const fetchProfile = async () => {
-      setLoadingProfile(true);
-      try {
-        const userDocRef = doc(db, 'users', user.uid);
-        const snap = await getDoc(userDocRef);
-        if (snap.exists()) {
-          const data = snap.data();
-          setProfileData({
-            fullName: data.fullName || '',
-            fechaNacimiento: data.fechaNacimiento || '',
-            sexo: data.sexo || '',
-            telefono: data.telefono || '',
-            universidad: data.universidad || '',
-            profesion: data.profesion || '',
-            fechaExamen: data.fechaExamen || '' // <-- SE OBTIENE EL NUEVO CAMPO
-          });
-        }
-      } catch (error) {
-        console.error('Error cargando perfil:', error);
-        Swal.fire({
-          title: 'Error',
-          text: 'No se pudieron cargar los datos de tu perfil.',
-          icon: 'error',
-          confirmButtonColor: COLORS.primary,
-          background: isDark ? '#1f2937' : '#ffffff',
-          color: isDark ? '#f9fafb' : COLORS.dark
-        });
-      } finally {
-        setLoadingProfile(false);
-        setInitialLoaded(true);
-      }
-    };
+  const isDirty = useMemo(
+    () =>
+      Object.keys(EMPTY_PROFILE).some(
+        (key) => String(profileData[key] || '') !== String(savedSnapshot[key] || '')
+      ),
+    [profileData, savedSnapshot]
+  );
 
-    fetchProfile();
-  }, [user, initialLoaded, isDark]);
+  const completedCount = Array.isArray(user?.pagoUnicoCursosCompletados)
+    ? user.pagoUnicoCursosCompletados.length
+    : 0;
+  const effectiveRole = role || user?.rol || 'user';
+  const accountActive = user?.active !== false;
+  const hasLimit = parseExpirationMs(user?.activeUntil) !== null;
+  const expired = isAccountExpired(user);
+  const startReference = user?.activeFrom || user?.createdAt || null;
+  const totalDays = hasLimit && startReference ? calculateDurationDays(startReference, user.activeUntil) : null;
+  const remainingDays = hasLimit ? calculateDurationDays(new Date().toISOString(), user.activeUntil) : null;
+  const validityPercent =
+    totalDays && totalDays > 0 && remainingDays !== null
+      ? Math.min(100, Math.max(0, Math.round((remainingDays / totalDays) * 100)))
+      : 100;
+  const memberSinceLabel = user?.createdAt ? formatDateShortEs(user.createdAt) : '';
+  const expirationLabel = formatExpirationDisplay(user?.activeUntil);
+  const examCountdown = useMemo(
+    () => getExamCountdown(profileData.fechaExamen),
+    [profileData.fechaExamen]
+  );
+
+  const displayName =
+    profileData.fullName.trim() ||
+    user?.fullName ||
+    user?.name ||
+    user?.displayName ||
+    'Estudiante Doctemia';
 
   const handleProfileChange = (e) => {
     const { name, value } = e.target;
-    setProfileData(prev => ({ ...prev, [name]: value }));
+    setProfileData((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleResetProfile = () => {
+    setProfileData(savedSnapshot);
   };
 
   const handleProfileSubmit = async (e) => {
     e.preventDefault();
     if (!user?.uid) {
-      Swal.fire({
-        title: 'Error',
-        text: 'Usuario no identificado.',
-        icon: 'error',
-        confirmButtonColor: COLORS.primary,
-        background: isDark ? '#1f2937' : '#ffffff',
-        color: isDark ? '#f9fafb' : COLORS.dark
-      });
+      toast.error('Usuario no identificado.');
       return;
     }
+
+    const trimmedName = profileData.fullName.trim();
+    if (!trimmedName) {
+      toast.error('Tu nombre completo no puede estar vacío.');
+      return;
+    }
+
+    const payload = {
+      fullName: trimmedName,
+      fechaNacimiento: profileData.fechaNacimiento || '',
+      sexo: profileData.sexo || '',
+      telefono: profileData.telefono.trim(),
+      universidad: profileData.universidad.trim(),
+      profesion: profileData.profesion.trim(),
+      fechaExamen: profileData.fechaExamen || '',
+    };
 
     setLoadingProfile(true);
     try {
       const userDocRef = doc(db, 'users', user.uid);
-      // ✅ CAMBIO: Se incluye el nuevo campo en la actualización
-      await updateDoc(userDocRef, {
-        fullName:        profileData.fullName,
-        fechaNacimiento: profileData.fechaNacimiento,
-        sexo:            profileData.sexo,
-        telefono:        profileData.telefono,
-        universidad:     profileData.universidad,
-        profesion:       profileData.profesion,
-        fechaExamen:     profileData.fechaExamen // <-- SE ACTUALIZA EL NUEVO CAMPO
-      });
-
-      if (refreshUserData) {
-        await refreshUserData(auth.currentUser);
-      }
-
-      Swal.fire({
-        title: '¡Actualizado!',
-        text: 'Tu perfil ha sido actualizado correctamente.',
-        icon: 'success',
-        confirmButtonColor: COLORS.primary,
-        background: isDark ? '#1f2937' : '#ffffff',
-        color: isDark ? '#f9fafb' : COLORS.dark
-      });
+      // AuthContext mantiene onSnapshot activo: sincroniza los cambios sin re-leer con getDoc
+      await updateDoc(userDocRef, payload);
+      setProfileData(payload);
+      toast.success('Perfil actualizado correctamente.');
     } catch (error) {
       console.error('Error actualizando perfil:', error);
-      Swal.fire({
-        title: 'Error',
-        text: `No se pudo actualizar: ${error.message}`,
-        icon: 'error',
-        confirmButtonColor: COLORS.primary,
-        background: isDark ? '#1f2937' : '#ffffff',
-        color: isDark ? '#f9fafb' : COLORS.dark
-      });
+      toast.error(`No se pudo actualizar: ${error.message}`);
     } finally {
       setLoadingProfile(false);
     }
@@ -150,541 +232,883 @@ export default function ProfilePage() {
 
   const handlePasswordChange = (e) => {
     const { name, value } = e.target;
-    setPasswordData(prev => ({ ...prev, [name]: value }));
+    setPasswordData((prev) => ({ ...prev, [name]: value }));
   };
+
+  const togglePasswordVisibility = (field) => {
+    setShowPasswords((prev) => ({
+      ...prev,
+      [field]: !prev[field],
+    }));
+  };
+
+  const passwordMinLengthOk = passwordData.newPassword.length >= 6;
+  const passwordsMatch =
+    Boolean(passwordData.confirmNewPassword) &&
+    passwordData.newPassword === passwordData.confirmNewPassword;
+  const passwordsMismatch =
+    Boolean(passwordData.confirmNewPassword) &&
+    passwordData.newPassword !== passwordData.confirmNewPassword;
+
+  const swalTheme = useMemo(
+    () => ({
+      background: isDark ? '#1e293b' : '#ffffff',
+      color: isDark ? '#f8fafc' : '#1a2639',
+      confirmButtonColor: isDark ? '#24B0BA' : '#014ba0',
+      cancelButtonColor: '#64748b',
+    }),
+    [isDark]
+  );
 
   const handlePasswordSubmit = async (e) => {
     e.preventDefault();
     const { newPassword, confirmNewPassword } = passwordData;
     if (newPassword !== confirmNewPassword) {
-      Swal.fire({
-        title: 'Error',
-        text: 'Las contraseñas no coinciden.',
-        icon: 'warning',
-        confirmButtonColor: COLORS.primary,
-        background: isDark ? '#1f2937' : '#ffffff',
-        color: isDark ? '#f9fafb' : COLORS.dark
-      });
+      toast.error('Las contraseñas no coinciden.');
       return;
     }
     if (newPassword.length < 6) {
-      Swal.fire({
-        title: 'Error',
-        text: 'La contraseña debe tener 6 o más caracteres.',
-        icon: 'warning',
-        confirmButtonColor: COLORS.primary,
-        background: isDark ? '#1f2937' : '#ffffff',
-        color: isDark ? '#f9fafb' : COLORS.dark
-      });
+      toast.error('La contraseña debe tener 6 o más caracteres.');
+      return;
+    }
+
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      toast.error('No hay sesión activa para actualizar la contraseña.');
       return;
     }
 
     setLoadingPassword(true);
-    const currentUser = auth.currentUser;
-    if (!currentUser) {
-      Swal.fire({
-        title: 'Error',
-        text: 'No hay usuario autenticado.',
-        icon: 'error',
-        confirmButtonColor: COLORS.primary,
-        background: isDark ? '#1f2937' : '#ffffff',
-        color: isDark ? '#f9fafb' : COLORS.dark
-      });
-      setLoadingPassword(false);
-      return;
-    }
-
     try {
       await updatePassword(currentUser, newPassword);
-      Swal.fire({
-        title: '¡Actualizada!',
-        text: 'Tu contraseña ha sido cambiada exitosamente.',
-        icon: 'success',
-        confirmButtonColor: COLORS.primary,
-        background: isDark ? '#1f2937' : '#ffffff',
-        color: isDark ? '#f9fafb' : COLORS.dark
-      });
-      setPasswordData({ currentPassword: '', newPassword: '', confirmNewPassword: '' });
+      setPasswordData({ newPassword: '', confirmNewPassword: '' });
+      toast.success('Tu contraseña ha sido actualizada.');
     } catch (error) {
       console.error('Error cambiando contraseña:', error);
       if (error.code === 'auth/requires-recent-login') {
-        const { value: pwd } = await Swal.fire({
-          title: 'Reautenticación Requerida',
+        const { value: currentPwd } = await Swal.fire({
+          title: 'Confirma tu identidad',
+          text: 'Por seguridad, ingresa tu contraseña actual para completar el cambio.',
           input: 'password',
-          inputLabel: 'Contraseña actual',
-          inputPlaceholder: 'Ingresa tu contraseña actual',
+          inputPlaceholder: 'Contraseña actual',
           showCancelButton: true,
-          confirmButtonText: 'Reautenticar',
+          confirmButtonText: 'Confirmar y cambiar',
           cancelButtonText: 'Cancelar',
-          confirmButtonColor: COLORS.primary,
-          cancelButtonColor: COLORS.accent,
-          background: isDark ? '#1f2937' : '#ffffff',
-          color: isDark ? '#f9fafb' : COLORS.dark,
-          inputAttributes: {
-            style: `border: 1px solid #014ba0; border-radius: 8px; padding: 8px;`
-          }
+          ...swalTheme,
         });
-        if (pwd) {
+        if (currentPwd) {
           try {
-            const cred = EmailAuthProvider.credential(currentUser.email, pwd);
+            const cred = EmailAuthProvider.credential(currentUser.email, currentPwd);
             await reauthenticateWithCredential(currentUser, cred);
             await updatePassword(currentUser, newPassword);
-            Swal.fire({
-              title: '¡Actualizada!',
-              text: 'Contraseña cambiada tras reautenticación exitosa.',
-              icon: 'success',
-              confirmButtonColor: COLORS.primary,
-              background: isDark ? '#1f2937' : '#ffffff',
-              color: isDark ? '#f9fafb' : COLORS.dark
-            });
-            setPasswordData({ currentPassword: '', newPassword: '', confirmNewPassword: '' });
+            setPasswordData({ newPassword: '', confirmNewPassword: '' });
+            toast.success('Contraseña actualizada correctamente.');
           } catch (reauthErr) {
             console.error('Error reautenticando:', reauthErr);
-            Swal.fire({
-              title: 'Error',
-              text: `No se pudo verificar tu contraseña: ${reauthErr.message}`,
-              icon: 'error',
-              confirmButtonColor: COLORS.primary,
-              background: isDark ? '#1f2937' : '#ffffff',
-              color: isDark ? '#f9fafb' : COLORS.dark
-            });
+            toast.error('No se pudo verificar tu contraseña actual.');
           }
         }
       } else {
-        Swal.fire({
-          title: 'Error',
-          text: `No se pudo cambiar la contraseña: ${error.message}`,
-          icon: 'error',
-          confirmButtonColor: COLORS.primary,
-          background: isDark ? '#1f2937' : '#ffffff',
-          color: isDark ? '#f9fafb' : COLORS.dark
-        });
+        toast.error(`No se pudo cambiar la contraseña: ${error.message}`);
       }
     } finally {
       setLoadingPassword(false);
     }
   };
 
-  const togglePasswordVisibility = (field) => {
-    setShowPasswords(prev => ({
-      ...prev,
-      [field]: !prev[field]
-    }));
-  };
-
-  if (!user || (!initialLoaded && loadingProfile)) {
+  if (!isLoaded || !user || !initialLoaded) {
     return (
-      <div 
-        className="flex justify-center items-center h-screen"
-        style={{ backgroundColor: COLORS.background }}
+      <div
+        className={`min-h-[calc(100vh-4rem)] flex flex-col justify-center items-center gap-3 ${
+          isDark ? 'bg-[#1a2639] text-white' : 'bg-[#FFF9F0] text-[#1a2639]'
+        }`}
       >
-        <div className="text-center">
-          <div 
-            className="animate-spin w-12 h-12 border-4 border-t-transparent rounded-full mx-auto mb-4"
-            style={{ borderColor: COLORS.primary, borderTopColor: 'transparent' }}
-          ></div>
-          <p 
-            className="text-xl font-semibold"
-            style={{ color: isDark ? '#f9fafb' : COLORS.dark }}
-          >
-            Cargando perfil...
-          </p>
-        </div>
+        <Loader2
+          className={`w-9 h-9 animate-spin ${isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'}`}
+        />
+        <p className={`text-sm font-semibold ${isDark ? 'text-slate-300' : 'text-[#2E4A70]'}`}>
+          Cargando perfil...
+        </p>
       </div>
     );
   }
 
-  const getInputStyles = (isDark) => ({
-    backgroundColor: isDark ? '#374151' : 'white',
-    borderColor: '#014ba0',
-    color: isDark ? '#f9fafb' : COLORS.dark,
-    borderWidth: '1px',
-    borderRadius: '12px'
-  });
-
-  const getCardStyles = (isDark) => ({
-    backgroundColor: isDark ? '#1f2937' : 'white',
-    border: `1px solid ${COLORS.neutral}`,
-    borderRadius: '20px',
-    boxShadow: isDark 
-      ? `0 10px 40px rgba(0,0,0,0.3)` 
-      : `0 10px 40px rgba(1, 75, 160, 0.12)`
-  });
+  const pageBg = isDark ? 'bg-[#1a2639] text-white' : 'bg-[#FFF9F0] text-[#1a2639]';
+  const cardSurface = isDark
+    ? 'bg-[#1e293b] border-white/10 text-white shadow-lg shadow-black/20'
+    : 'bg-white border-[#2E4A70]/15 text-[#1a2639] shadow-sm';
+  const mutedText = isDark ? 'text-slate-300' : 'text-[#2E4A70]';
+  const subtleText = isDark ? 'text-slate-400' : 'text-slate-500';
+  const dividerClass = isDark ? 'border-white/10' : 'border-[#2E4A70]/12';
+  const inputWrapperClass = `flex items-center gap-2.5 px-3.5 rounded-xl border transition-colors min-h-[44px] ${
+    isDark
+      ? 'bg-[#162235] border-white/15 text-white focus-within:border-[#24B0BA]'
+      : 'bg-slate-50/70 border-[#2E4A70]/20 text-[#1a2639] focus-within:border-[#014ba0] focus-within:bg-white'
+  }`;
+  const inputClass = `w-full min-w-0 py-2.5 bg-transparent text-sm font-medium outline-none ${
+    isDark ? 'text-white placeholder:text-slate-400' : 'text-[#1a2639] placeholder:text-slate-400'
+  }`;
+  const labelClass = `block text-xs font-bold uppercase tracking-wide mb-1.5 ${
+    isDark ? 'text-slate-300' : 'text-[#2E4A70]'
+  }`;
+  const primaryBtnClass = isDark
+    ? 'bg-[#24B0BA] hover:bg-[#1d9aa3] text-slate-950 font-bold'
+    : 'bg-[#014ba0] hover:bg-[#013b80] text-white font-bold';
 
   return (
-    <div 
-      className="min-h-screen transition-colors"
-      style={{ backgroundColor: COLORS.background }}
-    >
-      {/* Header con gradiente */}
-      <div 
-        className="p-6 pb-8"
-        style={{ 
-          background: `linear-gradient(135deg, ${COLORS.primary} 0%, #014ba0 100%)`,
+    <div className={`min-h-[calc(100vh-4rem)] py-6 sm:py-8 px-3.5 sm:px-6 lg:px-8 transition-colors ${pageBg}`}>
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          style: {
+            background: isDark ? '#1e293b' : '#ffffff',
+            color: isDark ? '#f8fafc' : '#1a2639',
+            border: isDark ? '1px solid rgba(255,255,255,0.12)' : '1px solid rgba(46,74,112,0.15)',
+          },
         }}
-      >
-        <div className="max-w-4xl mx-auto">
-          <div className="flex items-center gap-4 mb-2">
-            <div 
-              className="w-12 h-12 rounded-full flex items-center justify-center"
-              style={{ backgroundColor: 'rgba(255,255,255,0.2)' }}
-            >
-              <User className="w-6 h-6 text-white" />
-            </div>
-            <h1 className="text-4xl font-bold text-white">
-              Mi Perfil
+      />
+
+      <div className="max-w-4xl mx-auto space-y-6">
+        {/* Encabezado limpio de sección */}
+        <header className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+          <div className="space-y-1">
+            <h1 className={`text-2xl sm:text-3xl font-black tracking-tight ${isDark ? 'text-white' : 'text-[#014ba0]'}`}>
+              Mi Perfil y Cuenta
             </h1>
+            <p className={`text-sm ${mutedText}`}>
+              Administra tus datos académicos, fecha objetivo de examen y seguridad de acceso.
+            </p>
           </div>
-          <p className="text-white/80 text-lg">
-            Gestiona tu información personal y configuración de cuenta
-          </p>
-        </div>
-      </div>
 
-      {/* Contenido principal */}
-      <div className="max-w-4xl mx-auto p-6 -mt-4">
-        <div className="space-y-8">
-          
-          {/* Formulario de Perfil */}
-          <div 
-            className="p-8 transition-all duration-300"
-            style={getCardStyles(isDark)}
+          <Link
+            href="/app/pagoUnicoCourses"
+            className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border text-xs sm:text-sm font-bold transition-colors self-start sm:self-auto min-h-[42px] ${
+              isDark
+                ? 'bg-[#1e293b] border-white/15 text-[#24B0BA] hover:bg-white/5'
+                : 'bg-white border-[#2E4A70]/20 text-[#014ba0] hover:bg-slate-50'
+            }`}
           >
-            <div className="flex items-center gap-3 mb-8">
-              <div 
-                className="w-10 h-10 rounded-full flex items-center justify-center"
-                style={{ backgroundColor: `${COLORS.primary}20` }}
-              >
-                <UserCheck className="w-5 h-5" style={{ color: COLORS.primary }} />
+            <BookOpen className="w-4 h-4" />
+            <span>Ir a Mis Cursos</span>
+          </Link>
+        </header>
+
+        {/* TARJETA SUPERIOR DE PERFIL (por encima del formulario, sin foto de perfil) */}
+        <section className={`rounded-2xl border overflow-hidden ${cardSurface}`}>
+          <div className="h-1.5 bg-gradient-to-r from-[#014ba0] to-[#24B0BA]" />
+          <div className="p-5 sm:p-6 space-y-5">
+            {/* Identidad y meta de examen */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div className="min-w-0 space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={`text-[11px] font-extrabold uppercase tracking-wider px-2.5 py-0.5 rounded-full ${
+                      effectiveRole === 'admin'
+                        ? isDark
+                          ? 'bg-[#CF8A40]/20 text-[#CF8A40]'
+                          : 'bg-amber-100 text-amber-800'
+                        : isDark
+                          ? 'bg-[#24B0BA]/20 text-[#24B0BA]'
+                          : 'bg-[#014ba0]/10 text-[#014ba0]'
+                    }`}
+                  >
+                    {effectiveRole === 'admin' ? 'Administrador' : 'Estudiante'}
+                  </span>
+                  <span
+                    className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
+                      !accountActive || expired
+                        ? isDark
+                          ? 'bg-red-500/15 text-red-300'
+                          : 'bg-red-50 text-red-700'
+                        : isDark
+                          ? 'bg-emerald-500/15 text-emerald-300'
+                          : 'bg-emerald-50 text-emerald-700'
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        !accountActive || expired ? 'bg-red-500' : 'bg-emerald-500'
+                      }`}
+                    />
+                    {!accountActive ? 'Cuenta Inactiva' : expired ? 'Cuenta Vencida' : 'Cuenta Activa'}
+                  </span>
+                  {memberSinceLabel && memberSinceLabel !== 'Sin fecha' && (
+                    <span className={`text-[11px] font-semibold ${subtleText}`}>
+                      Miembro desde {memberSinceLabel}
+                    </span>
+                  )}
+                </div>
+
+                <h2 className="text-xl sm:text-2xl font-black leading-tight break-words">
+                  {displayName}
+                </h2>
+
+                <div className={`flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs ${subtleText}`}>
+                  {user.email && (
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                      <Mail className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{user.email}</span>
+                    </span>
+                  )}
+                  {profileData.telefono.trim() && (
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                      <Phone className="w-3.5 h-3.5 shrink-0" />
+                      <span>{profileData.telefono.trim()}</span>
+                    </span>
+                  )}
+                  {profileData.universidad.trim() && (
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                      <Building className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{profileData.universidad.trim()}</span>
+                    </span>
+                  )}
+                  {profileData.profesion.trim() && (
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                      <Briefcase className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{profileData.profesion.trim()}</span>
+                    </span>
+                  )}
+                </div>
               </div>
-              <h2 
-                className="text-2xl font-bold"
-                style={{ color: isDark ? '#f9fafb' : COLORS.dark }}
-              >
-                Información Personal
-              </h2>
+
+              {examCountdown?.status === 'upcoming' && (
+                <div
+                  className={`px-4 py-3 rounded-xl border shrink-0 sm:text-right ${
+                    isDark
+                      ? 'bg-[#162235] border-[#24B0BA]/30'
+                      : 'bg-[#FFF9F0] border-[#014ba0]/15'
+                  }`}
+                >
+                  <p className={`text-[11px] font-bold uppercase tracking-wider ${subtleText}`}>
+                    Meta de Examen
+                  </p>
+                  <p className={`text-2xl font-black tabular-nums leading-tight ${isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'}`}>
+                    {examCountdown.daysDiff}{' '}
+                    <span className={`text-xs font-bold ${mutedText}`}>
+                      {examCountdown.daysDiff === 1 ? 'día restante' : 'días restantes'}
+                    </span>
+                  </p>
+                  <p className={`text-[11px] capitalize ${subtleText}`}>
+                    {examCountdown.formattedDate}
+                  </p>
+                </div>
+              )}
             </div>
 
-            <form onSubmit={handleProfileSubmit}>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                
-                {/* Nombre Completo */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <User className="w-4 h-4" style={{ color: COLORS.primary }} />
-                    <label 
-                      htmlFor="fullName"
-                      className="text-sm font-medium"
-                      style={{ color: isDark ? '#e5e7eb' : COLORS.dark }}
-                    >
-                      Nombre Completo
-                    </label>
-                  </div>
-                  <input
-                    type="text"
-                    name="fullName"
-                    id="fullName"
-                    value={profileData.fullName}
-                    onChange={handleProfileChange}
-                    className="w-full px-4 py-3 focus:outline-none focus:ring-2 transition-all"
-                    style={{
-                      ...getInputStyles(isDark),
-                      '--tw-ring-color': '#014ba0'
-                    }}
-                    placeholder="Ingresa tu nombre completo"
-                    required
+            {/* Bloque de Vigencia de Cuenta (rango, corte Hora Bolivia y días restantes) */}
+            <div
+              className={`p-4 rounded-xl border space-y-2.5 ${
+                isDark ? 'bg-[#162235]/85 border-white/10' : 'bg-slate-50/90 border-slate-200/80'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <CalendarClock
+                    className={`w-4 h-4 shrink-0 ${isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'}`}
                   />
-                </div>
-
-                {/* Fecha de Nacimiento */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Calendar className="w-4 h-4" style={{ color: COLORS.primary }} />
-                    <label 
-                      htmlFor="fechaNacimiento"
-                      className="text-sm font-medium"
-                      style={{ color: isDark ? '#e5e7eb' : COLORS.dark }}
+                  <span className="text-xs sm:text-sm font-extrabold">
+                    Vigencia de la Cuenta
+                  </span>
+                  {hasLimit && user?.activeDurationMonths && (
+                    <span
+                      className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                        isDark ? 'bg-white/10 text-slate-200' : 'bg-white text-[#2E4A70] border border-slate-200'
+                      }`}
                     >
-                      Fecha de Nacimiento
-                    </label>
-                  </div>
-                  <input
-                    type="date"
-                    name="fechaNacimiento"
-                    id="fechaNacimiento"
-                    value={profileData.fechaNacimiento}
-                    onChange={handleProfileChange}
-                    className="w-full px-4 py-3 focus:outline-none focus:ring-2 transition-all"
-                    style={getInputStyles(isDark)}
-                  />
-                </div>
-
-                {/* Sexo */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <UserCheck className="w-4 h-4" style={{ color: COLORS.primary }} />
-                    <label 
-                      htmlFor="sexo"
-                      className="text-sm font-medium"
-                      style={{ color: isDark ? '#e5e7eb' : COLORS.dark }}
-                    >
-                      Sexo
-                    </label>
-                  </div>
-                  <select
-                    name="sexo"
-                    id="sexo"
-                    value={profileData.sexo}
-                    onChange={handleProfileChange}
-                    className="w-full px-4 py-3 focus:outline-none focus:ring-2 transition-all"
-                    style={getInputStyles(isDark)}
-                  >
-                    <option value="">Seleccionar...</option>
-                    <option value="Masculino">Masculino</option>
-                    <option value="Femenino">Femenino</option>
-                    <option value="Prefiero no decirlo">Prefiero no decirlo</option>
-                  </select>
-                </div>
-
-                {/* Teléfono */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Phone className="w-4 h-4" style={{ color: COLORS.primary }} />
-                    <label 
-                      htmlFor="telefono"
-                      className="text-sm font-medium"
-                      style={{ color: isDark ? '#e5e7eb' : COLORS.dark }}
-                    >
-                      Teléfono
-                    </label>
-                  </div>
-                  <input
-                    type="tel"
-                    name="telefono"
-                    id="telefono"
-                    value={profileData.telefono}
-                    onChange={handleProfileChange}
-                    placeholder="+591..."
-                    className="w-full px-4 py-3 focus:outline-none focus:ring-2 transition-all"
-                    style={getInputStyles(isDark)}
-                  />
-                </div>
-
-                {/* Universidad */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Building className="w-4 h-4" style={{ color: COLORS.primary }} />
-                    <label 
-                      htmlFor="universidad"
-                      className="text-sm font-medium"
-                      style={{ color: isDark ? '#e5e7eb' : COLORS.dark }}
-                    >
-                      Universidad
-                    </label>
-                  </div>
-                  <input
-                    type="text"
-                    name="universidad"
-                    id="universidad"
-                    value={profileData.universidad}
-                    onChange={handleProfileChange}
-                    className="w-full px-4 py-3 focus:outline-none focus:ring-2 transition-all"
-                    style={getInputStyles(isDark)}
-                    placeholder="Nombre de tu universidad"
-                  />
-                </div>
-
-                {/* Profesión */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Briefcase className="w-4 h-4" style={{ color: COLORS.primary }} />
-                    <label 
-                      htmlFor="profesion"
-                      className="text-sm font-medium"
-                      style={{ color: isDark ? '#e5e7eb' : COLORS.dark }}
-                    >
-                      Profesión / Cargo
-                    </label>
-                  </div>
-                  <input
-                    type="text"
-                    name="profesion"
-                    id="profesion"
-                    value={profileData.profesion}
-                    onChange={handleProfileChange}
-                    className="w-full px-4 py-3 focus:outline-none focus:ring-2 transition-all"
-                    style={getInputStyles(isDark)}
-                    placeholder="Tu profesión o cargo actual"
-                  />
-                </div>
-
-                {/* Fecha de Examen - NUEVO CAMPO */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <GraduationCap className="w-4 h-4" style={{ color: COLORS.primary }} />
-                    <label 
-                      htmlFor="fechaExamen"
-                      className="text-sm font-medium"
-                      style={{ color: isDark ? '#e5e7eb' : COLORS.dark }}
-                    >
-                      Fecha de Examen
-                    </label>
-                  </div>
-                  <input
-                    type="date"
-                    name="fechaExamen"
-                    id="fechaExamen"
-                    value={profileData.fechaExamen}
-                    onChange={handleProfileChange}
-                    className="w-full px-4 py-3 focus:outline-none focus:ring-2 transition-all"
-                    style={getInputStyles(isDark)}
-                  />
-                </div>
-              </div>
-
-              <div className="mt-8 flex justify-end">
-                <button 
-                  type="submit" 
-                  disabled={loadingProfile}
-                  className="inline-flex items-center gap-3 px-8 py-3 rounded-xl font-semibold text-white transition-all duration-300 hover:scale-105 disabled:opacity-50 disabled:scale-100"
-                  style={{ 
-                    backgroundColor: COLORS.primary,
-                    boxShadow: `0 8px 25px ${COLORS.primary}30`
-                  }}
-                >
-                  {loadingProfile ? (
-                    <>
-                      <div className="animate-spin w-5 h-5 border-2 border-white border-t-transparent rounded-full"></div>
-                      Guardando...
-                    </>
-                  ) : (
-                    <>
-                      <Save className="w-5 h-5" />
-                      Guardar Cambios
-                    </>
+                      Plan {user.activeDurationMonths} {user.activeDurationMonths === 1 ? 'mes' : 'meses'}
+                    </span>
                   )}
-                </button>
-              </div>
-            </form>
-          </div>
+                </div>
 
-          {/* Formulario de Cambio de Contraseña */}
-          <div 
-            className="p-8 transition-all duration-300"
-            style={getCardStyles(isDark)}
-          >
-            <div className="flex items-center gap-3 mb-8">
-              <div 
-                className="w-10 h-10 rounded-full flex items-center justify-center"
-                style={{ backgroundColor: `${COLORS.accent}20` }}
-              >
-                <Lock className="w-5 h-5" style={{ color: COLORS.accent }} />
+                <span
+                  className={`text-xs font-extrabold px-2.5 py-0.5 rounded-full tabular-nums ${
+                    !accountActive
+                      ? isDark
+                        ? 'bg-red-500/20 text-red-300'
+                        : 'bg-red-100 text-red-800'
+                      : !hasLimit
+                        ? isDark
+                          ? 'bg-sky-500/20 text-sky-300'
+                          : 'bg-sky-100 text-sky-800'
+                        : expired
+                          ? isDark
+                            ? 'bg-red-500/20 text-red-300'
+                            : 'bg-red-100 text-red-800'
+                          : remainingDays !== null && remainingDays <= 7
+                            ? isDark
+                              ? 'bg-[#CF8A40]/20 text-[#CF8A40]'
+                              : 'bg-amber-100 text-amber-800'
+                            : isDark
+                              ? 'bg-emerald-500/20 text-emerald-300'
+                              : 'bg-emerald-100 text-emerald-800'
+                  }`}
+                >
+                  {!accountActive
+                    ? 'Cuenta desactivada'
+                    : !hasLimit
+                      ? 'Sin vencimiento (Permanente)'
+                      : expired
+                        ? `Venció el ${expirationLabel}`
+                        : `${remainingDays} ${remainingDays === 1 ? 'día restante' : 'días restantes'}`}
+                </span>
               </div>
-              <h2 
-                className="text-2xl font-bold"
-                style={{ color: isDark ? '#f9fafb' : COLORS.dark }}
-              >
-                Cambiar Contraseña
-              </h2>
+
+              {hasLimit ? (
+                <>
+                  <div className={`grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs ${mutedText}`}>
+                    <p>
+                      <span className={subtleText}>Periodo activo: </span>
+                      <strong className="font-bold">
+                        {startReference ? `Del ${formatDateShortEs(startReference)} al ` : 'Hasta el '}
+                        {formatDateShortEs(user.activeUntil)}
+                      </strong>
+                    </p>
+                    <p className="sm:text-right">
+                      <span className={subtleText}>Vencimiento exacto (Bolivia): </span>
+                      <strong className="font-bold tabular-nums">
+                        {formatDateTimeBolivia(user.activeUntil)} hrs
+                      </strong>
+                    </p>
+                  </div>
+                  {totalDays > 0 && !expired && (
+                    <div
+                      className={`h-1.5 w-full rounded-full overflow-hidden ${
+                        isDark ? 'bg-white/10' : 'bg-slate-200'
+                      }`}
+                      aria-hidden="true"
+                    >
+                      <div
+                        className={`h-full rounded-full transition-all ${
+                          remainingDays <= 7
+                            ? 'bg-[#CF8A40]'
+                            : isDark
+                              ? 'bg-[#24B0BA]'
+                              : 'bg-[#014ba0]'
+                        }`}
+                        style={{ width: `${Math.max(4, validityPercent)}%` }}
+                      />
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className={`text-xs ${subtleText}`}>
+                  Tu cuenta está configurada sin límite de expiración automática.
+                </p>
+              )}
             </div>
 
-            <form onSubmit={handlePasswordSubmit}>
-              <div className="space-y-6 max-w-md">
-                
-                {/* Nueva Contraseña */}
-                <div className="space-y-2">
-                  <label 
-                    htmlFor="newPassword"
-                    className="text-sm font-medium"
-                    style={{ color: isDark ? '#e5e7eb' : COLORS.dark }}
-                  >
-                    Nueva Contraseña
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showPasswords.new ? "text" : "password"}
-                      name="newPassword"
-                      id="newPassword"
-                      value={passwordData.newPassword}
-                      onChange={handlePasswordChange}
-                      className="w-full px-4 py-3 pr-12 focus:outline-none focus:ring-2 transition-all"
-                      style={getInputStyles(isDark)}
-                      placeholder="Mínimo 6 caracteres"
-                      required
-                      minLength={6}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => togglePasswordVisibility('new')}
-                      className="absolute right-3 top-1/2 transform -translate-y-1/2"
-                      style={{ color: COLORS.primary }}
-                    >
-                      {showPasswords.new ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Confirmar Nueva Contraseña */}
-                <div className="space-y-2">
-                  <label 
-                    htmlFor="confirmNewPassword"
-                    className="text-sm font-medium"
-                    style={{ color: isDark ? '#e5e7eb' : COLORS.dark }}
-                  >
-                    Confirmar Nueva Contraseña
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showPasswords.confirm ? "text" : "password"}
-                      name="confirmNewPassword"
-                      id="confirmNewPassword"
-                      value={passwordData.confirmNewPassword}
-                      onChange={handlePasswordChange}
-                      className="w-full px-4 py-3 pr-12 focus:outline-none focus:ring-2 transition-all"
-                      style={getInputStyles(isDark)}
-                      placeholder="Repite la nueva contraseña"
-                      required
-                      minLength={6}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => togglePasswordVisibility('confirm')}
-                      className="absolute right-3 top-1/2 transform -translate-y-1/2"
-                      style={{ color: COLORS.primary }}
-                    >
-                      {showPasswords.confirm ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                    </button>
-                  </div>
-                </div>
+            {/* Indicadores de acceso y progreso */}
+            <div className={`pt-1 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs`}>
+              <div
+                className={`p-3 rounded-xl border ${
+                  isDark ? 'bg-[#162235]/80 border-white/10' : 'bg-slate-50/80 border-slate-200/80'
+                }`}
+              >
+                <span className={`font-semibold flex items-center gap-1.5 ${subtleText}`}>
+                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                  Acceso a Cursos Pago Único
+                </span>
+                <p
+                  className={`font-extrabold text-sm mt-1 ${
+                    user.hasPagoUnicoAccess
+                      ? isDark
+                        ? 'text-emerald-300'
+                        : 'text-emerald-700'
+                      : isDark
+                        ? 'text-amber-300'
+                        : 'text-amber-700'
+                  }`}
+                >
+                  {user.hasPagoUnicoAccess ? 'Habilitado' : 'Requiere activación'}
+                </p>
               </div>
 
-              <div className="mt-8 flex justify-end">
-                <button 
-                  type="submit" 
-                  disabled={loadingPassword}
-                  className="inline-flex items-center gap-3 px-8 py-3 rounded-xl font-semibold text-white transition-all duration-300 hover:scale-105 disabled:opacity-50 disabled:scale-100"
-                  style={{ 
-                    backgroundColor: COLORS.accent,
-                    boxShadow: `0 8px 25px ${COLORS.accent}30`
-                  }}
+              <div
+                className={`p-3 rounded-xl border ${
+                  isDark ? 'bg-[#162235]/80 border-white/10' : 'bg-slate-50/80 border-slate-200/80'
+                }`}
+              >
+                <span className={`font-semibold flex items-center gap-1.5 ${subtleText}`}>
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  Cursos completados
+                </span>
+                <p className="font-extrabold text-sm mt-1 tabular-nums">{completedCount}</p>
+              </div>
+
+              <div
+                className={`p-3 rounded-xl border ${
+                  isDark ? 'bg-[#162235]/80 border-white/10' : 'bg-slate-50/80 border-slate-200/80'
+                }`}
+              >
+                <span className={`font-semibold flex items-center gap-1.5 ${subtleText}`}>
+                  <GraduationCap className="w-3.5 h-3.5 shrink-0" />
+                  Fecha objetivo de examen
+                </span>
+                <p className="font-extrabold text-sm mt-1 capitalize truncate">
+                  {examCountdown
+                    ? examCountdown.status === 'today'
+                      ? '¡Hoy es tu examen!'
+                      : examCountdown.formattedDate
+                    : 'Sin definir'}
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* FORMULARIO DE EDICIÓN Y SEGURIDAD (debajo de la tarjeta de perfil) */}
+        <main className="min-w-0">
+          <div className={`rounded-2xl border overflow-hidden ${cardSurface}`}>
+            {/* Pestañas */}
+            <div
+              role="tablist"
+              aria-label="Secciones de perfil"
+              className={`flex border-b px-4 sm:px-6 pt-3 gap-2 overflow-x-auto ${dividerClass} ${
+                isDark ? 'bg-[#162235]/60' : 'bg-slate-50/70'
+              }`}
+            >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'personal'}
+                  onClick={() => setActiveTab('personal')}
+                  className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
+                    activeTab === 'personal'
+                      ? isDark
+                        ? 'border-[#24B0BA] text-[#24B0BA]'
+                        : 'border-[#014ba0] text-[#014ba0]'
+                      : isDark
+                        ? 'border-transparent text-slate-400 hover:text-slate-200'
+                        : 'border-transparent text-slate-500 hover:text-slate-800'
+                  }`}
                 >
-                  {loadingPassword ? (
-                    <>
-                      <div className="animate-spin w-5 h-5 border-2 border-white border-t-transparent rounded-full"></div>
-                      Cambiando...
-                    </>
-                  ) : (
-                    <>
-                      <Lock className="w-5 h-5" />
-                      Cambiar Contraseña
-                    </>
+                  <UserCheck className="w-4 h-4" />
+                  <span>Información Personal</span>
+                  {isDirty && (
+                    <span
+                      className="w-2 h-2 rounded-full bg-[#CF8A40]"
+                      title="Cambios sin guardar"
+                    />
                   )}
                 </button>
-              </div>
-            </form>
-          </div>
 
-        </div>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === 'security'}
+                  onClick={() => setActiveTab('security')}
+                  className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-colors whitespace-nowrap cursor-pointer ${
+                    activeTab === 'security'
+                      ? isDark
+                        ? 'border-[#24B0BA] text-[#24B0BA]'
+                        : 'border-[#014ba0] text-[#014ba0]'
+                      : isDark
+                        ? 'border-transparent text-slate-400 hover:text-slate-200'
+                        : 'border-transparent text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  <Lock className="w-4 h-4" />
+                  <span>Seguridad y Contraseña</span>
+                </button>
+              </div>
+
+              {activeTab === 'personal' ? (
+                <form onSubmit={handleProfileSubmit} className="p-4 sm:p-6 lg:p-7 space-y-6">
+                  {/* Bloque 1: Identidad y Contacto */}
+                  <div className="space-y-4">
+                    <div className={`pb-2 border-b ${dividerClass}`}>
+                      <h3 className="text-sm sm:text-base font-extrabold">
+                        Identidad y Contacto
+                      </h3>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label htmlFor="fullName" className={labelClass}>
+                          Nombre Completo <span className="text-red-500">*</span>
+                        </label>
+                        <div className={inputWrapperClass}>
+                          <User className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                          <input
+                            type="text"
+                            name="fullName"
+                            id="fullName"
+                            autoComplete="name"
+                            value={profileData.fullName}
+                            onChange={handleProfileChange}
+                            placeholder="Tu nombre completo"
+                            required
+                            className={inputClass}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label htmlFor="accountEmail" className={labelClass}>
+                          Correo Electrónico
+                        </label>
+                        <div
+                          className={`flex items-center gap-2.5 px-3.5 rounded-xl border min-h-[44px] opacity-80 ${
+                            isDark
+                              ? 'bg-[#162235]/50 border-white/10 text-slate-300'
+                              : 'bg-slate-100 border-slate-200 text-slate-600'
+                          }`}
+                        >
+                          <Mail className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                          <input
+                            type="email"
+                            id="accountEmail"
+                            value={user.email || ''}
+                            readOnly
+                            disabled
+                            className="w-full min-w-0 py-2.5 bg-transparent text-sm font-medium outline-none cursor-not-allowed"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label htmlFor="fechaNacimiento" className={labelClass}>
+                          Fecha de Nacimiento
+                        </label>
+                        <div className={inputWrapperClass}>
+                          <Calendar className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                          <input
+                            type="date"
+                            name="fechaNacimiento"
+                            id="fechaNacimiento"
+                            autoComplete="bday"
+                            value={profileData.fechaNacimiento}
+                            onChange={handleProfileChange}
+                            style={{ colorScheme: isDark ? 'dark' : 'light' }}
+                            className={inputClass}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label htmlFor="sexo" className={labelClass}>
+                          Sexo
+                        </label>
+                        <div className={inputWrapperClass}>
+                          <UserCheck className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                          <select
+                            name="sexo"
+                            id="sexo"
+                            autoComplete="sex"
+                            value={profileData.sexo}
+                            onChange={handleProfileChange}
+                            style={{ colorScheme: isDark ? 'dark' : 'light' }}
+                            className={`${inputClass} cursor-pointer`}
+                          >
+                            <option value="" className={isDark ? 'bg-[#1e293b]' : 'bg-white'}>
+                              Seleccionar...
+                            </option>
+                            <option value="Masculino" className={isDark ? 'bg-[#1e293b]' : 'bg-white'}>
+                              Masculino
+                            </option>
+                            <option value="Femenino" className={isDark ? 'bg-[#1e293b]' : 'bg-white'}>
+                              Femenino
+                            </option>
+                            <option
+                              value="Prefiero no decirlo"
+                              className={isDark ? 'bg-[#1e293b]' : 'bg-white'}
+                            >
+                              Prefiero no decirlo
+                            </option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="sm:col-span-2">
+                        <label htmlFor="telefono" className={labelClass}>
+                          Teléfono / WhatsApp
+                        </label>
+                        <div className={inputWrapperClass}>
+                          <Phone className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                          <input
+                            type="tel"
+                            name="telefono"
+                            id="telefono"
+                            autoComplete="tel"
+                            value={profileData.telefono}
+                            onChange={handleProfileChange}
+                            placeholder="+591 ..."
+                            className={inputClass}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Bloque 2: Perfil Académico y Objetivo */}
+                  <div className="space-y-4">
+                    <div className={`pb-2 border-b ${dividerClass}`}>
+                      <h3 className="text-sm sm:text-base font-extrabold">
+                        Perfil Académico y Meta
+                      </h3>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label htmlFor="universidad" className={labelClass}>
+                          Universidad
+                        </label>
+                        <div className={inputWrapperClass}>
+                          <Building className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                          <input
+                            type="text"
+                            name="universidad"
+                            id="universidad"
+                            autoComplete="organization"
+                            value={profileData.universidad}
+                            onChange={handleProfileChange}
+                            placeholder="Nombre de tu universidad"
+                            className={inputClass}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label htmlFor="profesion" className={labelClass}>
+                          Profesión / Cargo
+                        </label>
+                        <div className={inputWrapperClass}>
+                          <Briefcase className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                          <input
+                            type="text"
+                            name="profesion"
+                            id="profesion"
+                            autoComplete="organization-title"
+                            value={profileData.profesion}
+                            onChange={handleProfileChange}
+                            placeholder="Ej: Interno de Medicina / Médico"
+                            className={inputClass}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="sm:col-span-2">
+                        <label htmlFor="fechaExamen" className={labelClass}>
+                          Fecha Tentativa de Examen
+                        </label>
+                        <div className={inputWrapperClass}>
+                          <GraduationCap className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                          <input
+                            type="date"
+                            name="fechaExamen"
+                            id="fechaExamen"
+                            value={profileData.fechaExamen}
+                            onChange={handleProfileChange}
+                            style={{ colorScheme: isDark ? 'dark' : 'light' }}
+                            className={inputClass}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Barra de acciones */}
+                  <div className={`pt-4 border-t flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3 ${dividerClass}`}>
+                    <div className="flex items-center gap-2 text-xs font-semibold">
+                      {isDirty ? (
+                        <span className={isDark ? 'text-[#CF8A40]' : 'text-amber-700'}>
+                          Tienes cambios pendientes por guardar.
+                        </span>
+                      ) : (
+                        <span className={subtleText}>
+                          Tus datos están al día.
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-2.5">
+                      {isDirty && (
+                        <button
+                          type="button"
+                          onClick={handleResetProfile}
+                          disabled={loadingProfile}
+                          className={`inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl border text-xs sm:text-sm font-bold transition-colors min-h-[44px] cursor-pointer disabled:opacity-50 ${
+                            isDark
+                              ? 'border-white/15 text-slate-300 hover:bg-white/5'
+                              : 'border-[#2E4A70]/20 text-[#2E4A70] hover:bg-slate-100'
+                          }`}
+                        >
+                          <RotateCcw className="w-4 h-4" />
+                          <span>Descartar</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="submit"
+                        disabled={loadingProfile || !isDirty}
+                        className={`inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl text-xs sm:text-sm transition-colors min-h-[44px] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${primaryBtnClass}`}
+                      >
+                        {loadingProfile ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Guardando...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Save className="w-4 h-4" />
+                            <span>Guardar Cambios</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              ) : (
+                <form onSubmit={handlePasswordSubmit} className="p-4 sm:p-6 lg:p-7 space-y-6">
+                  <div
+                    className={`p-3.5 rounded-xl border flex items-start gap-3 text-xs leading-relaxed ${
+                      isDark
+                        ? 'bg-[#162235] border-white/10 text-slate-300'
+                        : 'bg-slate-50 border-slate-200 text-[#2E4A70]'
+                    }`}
+                  >
+                    <ShieldCheck
+                      className={`w-4 h-4 shrink-0 mt-0.5 ${
+                        isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'
+                      }`}
+                    />
+                    <p>
+                      Usa una contraseña segura que no utilices en otros sitios. Si tu sesión lleva bastante tiempo abierta, el sistema te pedirá confirmar tu contraseña actual antes de aplicar el cambio.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label htmlFor="newPassword" className={labelClass}>
+                        Nueva Contraseña
+                      </label>
+                      <div className={inputWrapperClass}>
+                        <Lock className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                        <input
+                          type={showPasswords.new ? 'text' : 'password'}
+                          name="newPassword"
+                          id="newPassword"
+                          autoComplete="new-password"
+                          value={passwordData.newPassword}
+                          onChange={handlePasswordChange}
+                          placeholder="Mínimo 6 caracteres"
+                          required
+                          minLength={6}
+                          className={inputClass}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => togglePasswordVisibility('new')}
+                          aria-label={showPasswords.new ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                          className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                            isDark ? 'text-slate-300 hover:bg-white/10' : 'text-[#014ba0] hover:bg-slate-200/60'
+                          }`}
+                        >
+                          {showPasswords.new ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="confirmNewPassword" className={labelClass}>
+                        Confirmar Contraseña
+                      </label>
+                      <div className={inputWrapperClass}>
+                        <Lock className="w-4 h-4 shrink-0 opacity-60 pointer-events-none" />
+                        <input
+                          type={showPasswords.confirm ? 'text' : 'password'}
+                          name="confirmNewPassword"
+                          id="confirmNewPassword"
+                          autoComplete="new-password"
+                          value={passwordData.confirmNewPassword}
+                          onChange={handlePasswordChange}
+                          placeholder="Repite la nueva contraseña"
+                          required
+                          minLength={6}
+                          className={inputClass}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => togglePasswordVisibility('confirm')}
+                          aria-label={showPasswords.confirm ? 'Ocultar confirmación' : 'Mostrar confirmación'}
+                          className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                            isDark ? 'text-slate-300 hover:bg-white/10' : 'text-[#014ba0] hover:bg-slate-200/60'
+                          }`}
+                        >
+                          {showPasswords.confirm ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Requisitos en tiempo real */}
+                  <div className="flex flex-wrap gap-3 text-xs font-semibold">
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full ${
+                        passwordMinLengthOk
+                          ? isDark
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'bg-emerald-50 text-emerald-700'
+                          : isDark
+                            ? 'bg-white/5 text-slate-400'
+                            : 'bg-slate-100 text-slate-500'
+                      }`}
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Mínimo 6 caracteres</span>
+                    </span>
+
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full ${
+                        passwordsMatch
+                          ? isDark
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'bg-emerald-50 text-emerald-700'
+                          : passwordsMismatch
+                            ? isDark
+                              ? 'bg-red-500/20 text-red-300'
+                              : 'bg-red-50 text-red-700'
+                            : isDark
+                              ? 'bg-white/5 text-slate-400'
+                              : 'bg-slate-100 text-slate-500'
+                      }`}
+                    >
+                      {passwordsMismatch ? (
+                        <AlertCircle className="w-3.5 h-3.5" />
+                      ) : (
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {passwordsMismatch
+                          ? 'Las contraseñas no coinciden'
+                          : 'Las contraseñas coinciden'}
+                      </span>
+                    </span>
+                  </div>
+
+                  <div className={`pt-4 border-t flex justify-end ${dividerClass}`}>
+                    <button
+                      type="submit"
+                      disabled={loadingPassword || !passwordMinLengthOk || !passwordsMatch}
+                      className={`inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl text-xs sm:text-sm transition-colors min-h-[44px] w-full sm:w-auto cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${primaryBtnClass}`}
+                    >
+                      {loadingPassword ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Actualizando...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Lock className="w-4 h-4" />
+                          <span>Actualizar Contraseña</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </main>
       </div>
     </div>
   );
