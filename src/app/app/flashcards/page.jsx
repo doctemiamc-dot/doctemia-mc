@@ -1,21 +1,26 @@
 "use client";
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 
 import { useRouter } from 'next/navigation';
 import { useTheme } from '@/context/ThemeContext';
 import { useAuth } from '@/context/AuthContext';
 import {
   getFlashcardMetrics,
+  peekCachedFlashcardMetrics,
   restoreMasteredFlashcards,
   getMasteredCount,
   getCategoryFlashcardCounts,
+  peekCachedCategoryFlashcardCounts,
   getSubthemeFlashcardCounts,
+  peekCachedSubthemeFlashcardCounts,
+  prefetchSubthemeStudy,
 } from '@/lib/flashcardServices';
 import {
   getCachedCategories,
+  peekCachedCategories,
   getCachedSubcategories,
+  peekCachedSubcategories,
   getCachedContactInfo,
   getCachedPendingAccessRequest,
   setCachedPendingAccessRequest,
@@ -119,28 +124,44 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
     };
 
     return (
-        <div className="min-h-screen bg-gradient-to-br from-orange-50 to-blue-50 flex flex-col items-center justify-center p-4">
-            <div className="max-w-lg w-full bg-white rounded-2xl shadow-2xl p-8 text-center transform hover:scale-105 transition-all duration-300">
+        <div
+            className={`min-h-screen flex flex-col items-center justify-center p-4 transition-colors ${
+                isDark
+                    ? 'bg-[#060A13] text-white'
+                    : 'bg-gradient-to-br from-orange-50 to-blue-50 text-gray-800'
+            }`}
+        >
+            <div
+                className={`max-w-lg w-full rounded-2xl shadow-2xl p-8 text-center border transform hover:scale-[1.01] transition-all duration-300 ${
+                    isDark ? 'bg-[#152238] border-white/10 text-white' : 'bg-white border-blue-50 text-gray-800'
+                }`}
+            >
                 <div className="w-24 h-24 bg-gradient-to-r from-teal-400 to-blue-500 rounded-full flex items-center justify-center mx-auto mb-6">
                     <LockKeyhole className="h-12 w-12 text-white" />
                 </div>
                 
-                <h1 className="text-3xl font-bold text-gray-800 mb-4">Acceso Restringido</h1>
-                <p className="text-gray-600 text-lg mb-8 leading-relaxed">
+                <h1 className={`text-3xl font-bold mb-4 ${isDark ? 'text-white' : 'text-gray-800'}`}>Acceso Restringido</h1>
+                <p className={`text-lg mb-8 leading-relaxed ${isDark ? 'text-slate-300' : 'text-gray-600'}`}>
                     Para acceder al sistema de Flashcards inteligentes, necesitas la aprobación de nuestro equipo.
                 </p>
 
                 <div className="space-y-4">
                     {requestSent ? (
-                        <div className="flex items-center justify-center gap-3 p-4 bg-amber-50 rounded-xl border border-amber-300">
-                            <Hourglass className="h-6 w-6 text-amber-600 animate-spin" />
-                            <span className="font-semibold text-amber-800">Tu solicitud está en proceso</span>
+                        <div
+                            className={`flex items-center justify-center gap-3 p-4 rounded-xl border ${
+                                isDark
+                                    ? 'bg-amber-500/15 border-amber-400/30 text-amber-200'
+                                    : 'bg-amber-50 border-amber-300 text-amber-800'
+                            }`}
+                        >
+                            <Hourglass className={`h-6 w-6 animate-spin ${isDark ? 'text-amber-300' : 'text-amber-600'}`} />
+                            <span className="font-semibold">Tu solicitud está en proceso</span>
                         </div>
                     ) : (
                         <button 
                             onClick={handleRequestAccessPopup} 
                             disabled={isSubmitting} 
-                            className="w-full bg-gradient-to-r from-teal-500 to-blue-600 text-white font-bold py-4 px-8 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 disabled:opacity-50 disabled:transform-none"
+                            className="w-full bg-gradient-to-r from-teal-500 to-blue-600 text-white font-bold py-4 px-8 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-[1.02] transition-all duration-300 disabled:opacity-50 disabled:transform-none cursor-pointer"
                         >
                             {isSubmitting ? (
                                 <span className="flex items-center justify-center gap-2">
@@ -160,29 +181,35 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
 
             {/* Modal Mejorado */}
             {showModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-50 backdrop-blur-sm">
-                    <div className="relative w-full max-w-md bg-white rounded-2xl shadow-2xl transform scale-100 transition-all duration-300">
-                        <div className="flex items-center justify-between p-6 border-b border-gray-200">
-                            <h3 className="text-2xl font-bold text-[#014ba0]">
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+                    <div
+                        className={`relative w-full max-w-md rounded-2xl shadow-2xl border transform scale-100 transition-all duration-300 ${
+                            isDark ? 'bg-[#152238] border-white/15 text-white' : 'bg-white border-gray-200 text-gray-800'
+                        }`}
+                    >
+                        <div className={`flex items-center justify-between p-6 border-b ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+                            <h3 className={`text-2xl font-bold ${isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'}`}>
                                 ¡Obtén tu Acceso!
                             </h3>
                             <button 
                                 onClick={() => setShowModal(false)} 
-                                className="text-gray-400 hover:text-gray-600 transition-colors p-2 hover:bg-gray-100 rounded-full"
+                                className={`transition-colors p-2 rounded-full cursor-pointer ${
+                                    isDark ? 'text-slate-300 hover:text-white hover:bg-white/10' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                                }`}
                             >
                                 ✕
                             </button>
                         </div>
 
                         <div className="p-6 space-y-6">
-                            <p className="text-center text-gray-700 leading-relaxed">
+                            <p className={`text-center leading-relaxed ${isDark ? 'text-slate-300' : 'text-gray-700'}`}>
                                 Realiza el pago usando el código QR y contáctanos vía WhatsApp para activación inmediata.
                             </p>
 
                             {/* QR Code */}
                             <div className="flex justify-center">
                                 {contactInfo.qrUrl ? (
-                                    <div className="w-56 h-56 rounded-2xl border-4 border-gradient-to-r from-teal-400 to-blue-500 overflow-hidden shadow-lg">
+                                    <div className="w-56 h-56 rounded-2xl border-4 border-teal-400/60 overflow-hidden shadow-lg bg-white">
                                         <img 
                                             src={(() => {
                                                 if (contactInfo.qrUrl.includes('drive.google.com/uc?export=view&id=')) {
@@ -196,14 +223,14 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
                                         />
                                     </div>
                                 ) : (
-                                    <div className="w-56 h-56 bg-gray-100 rounded-2xl flex items-center justify-center">
-                                        <p className="text-gray-500">QR no disponible</p>
+                                    <div className={`w-56 h-56 rounded-2xl flex items-center justify-center ${isDark ? 'bg-[#0A111F] text-slate-400' : 'bg-gray-100 text-gray-500'}`}>
+                                        <p>QR no disponible</p>
                                     </div>
                                 )}
                             </div>
 
                             <div className="text-center">
-                                <p className="font-semibold text-gray-800 mb-4">¿Ya completaste el pago?</p>
+                                <p className={`font-semibold mb-4 ${isDark ? 'text-white' : 'text-gray-800'}`}>¿Ya completaste el pago?</p>
                                 
                                 <a 
                                     href={`https://api.whatsapp.com/send?phone=${contactInfo.adminPhone}&text=${encodeURIComponent(`Hola ${NOMBRE_NEGOCIO}, soy ${user.name || user.displayName}. He realizado el pago para acceso a las Flashcards. Adjunto comprobante.`)}`}
@@ -220,10 +247,10 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
 
                             <div className="relative my-6">
                                 <div className="absolute inset-0 flex items-center">
-                                    <span className="w-full border-t border-gray-300"></span>
+                                    <span className={`w-full border-t ${isDark ? 'border-white/15' : 'border-gray-300'}`}></span>
                                 </div>
                                 <div className="relative flex justify-center text-sm uppercase font-semibold">
-                                    <span className="px-4 bg-white text-gray-500">O solicita contacto</span>
+                                    <span className={`px-4 ${isDark ? 'bg-[#152238] text-slate-400' : 'bg-white text-gray-500'}`}>O solicita contacto</span>
                                 </div>
                             </div>
 
@@ -232,21 +259,27 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
                                 value={phoneInput}
                                 onChange={(e) => setPhoneInput(e.target.value)}
                                 placeholder="Tu número de WhatsApp (+591...)"
-                                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition-all"
+                                className={`w-full px-4 py-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition-all ${
+                                    isDark
+                                        ? 'bg-[#0A111F] border-white/15 text-white placeholder:text-slate-400'
+                                        : 'bg-white border-gray-300 text-gray-900 placeholder:text-gray-400'
+                                }`}
                             />
                         </div>
 
-                        <div className="flex gap-3 p-6 border-t border-gray-200">
+                        <div className={`flex gap-3 p-6 border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
                             <button 
                                 onClick={() => setShowModal(false)} 
-                                className="flex-1 px-6 py-3 border border-gray-300 text-gray-700 rounded-xl hover:bg-gray-50 transition-colors font-medium"
+                                className={`flex-1 px-6 py-3 border rounded-xl transition-colors font-medium cursor-pointer ${
+                                    isDark ? 'border-white/15 text-slate-200 hover:bg-white/10' : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                                }`}
                             >
                                 Cancelar
                             </button>
                             <button 
                                 onClick={handleSubmitRequest}
                                 disabled={isSubmitting || !phoneInput}
-                                className="flex-1 px-6 py-3 bg-gradient-to-r from-teal-500 to-blue-600 text-white rounded-xl hover:from-teal-600 hover:to-blue-700 transition-all disabled:opacity-50 font-medium"
+                                className="flex-1 px-6 py-3 bg-gradient-to-r from-teal-500 to-blue-600 text-white rounded-xl hover:from-teal-600 hover:to-blue-700 transition-all disabled:opacity-50 font-medium cursor-pointer"
                             >
                                 {isSubmitting ? 'Enviando...' : 'Enviar Solicitud'}
                             </button>
@@ -260,7 +293,7 @@ const AccessDeniedScreen = ({ user, isDark, swalTheme }) => {
 
 export default function StudentFlashcardsPage() {
   const { isDark, isLoaded } = useTheme();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const router = useRouter();
   const [categories, setCategories] = useState([]);
   const [catCardCounts, setCatCardCounts] = useState({});
@@ -282,6 +315,7 @@ export default function StudentFlashcardsPage() {
   const [loadingMetrics, setLoadingMetrics] = useState(true);
   const masteredMapRef = useRef({});
   const subthemesPanelRef = useRef(null);
+  const prefetchedSubthemesRef = useRef(new Set());
   
   // Estado para la Radiografía
   const [selectedCardForRadiography, setSelectedCardForRadiography] = useState(null);
@@ -291,6 +325,20 @@ export default function StudentFlashcardsPage() {
   useEffect(() => {
     router.prefetch('/app/flashcards/estudio');
   }, [router]);
+
+  const prewarmSubtheme = useCallback(
+    (subtemaName) => {
+      const cleanName = subtemaName?.trim();
+      if (!cleanName) return;
+      const cacheKey = `${user?.uid || 'anon'}::${cleanName}`;
+      if (!prefetchedSubthemesRef.current.has(cacheKey)) {
+        prefetchedSubthemesRef.current.add(cacheKey);
+        router.prefetch(`/app/flashcards/estudio?subtema=${encodeURIComponent(subtemaName)}`);
+      }
+      prefetchSubthemeStudy(user?.uid, cleanName);
+    },
+    [router, user?.uid]
+  );
 
   useEffect(() => {
     if (!openingSubtheme) return undefined;
@@ -314,15 +362,22 @@ export default function StudentFlashcardsPage() {
   const handleSelectCategory = async (cat, scrollOnMobile = false) => {
     setSelectedCat(cat);
     setSubthemeSearch('');
-    setLoadingSub(true);
+
+    const cachedSubs = peekCachedSubcategories(cat.id);
+    const cachedSubCounts = peekCachedSubthemeFlashcardCounts(cat.id);
+    const hasInstantCache = cachedSubs !== null && cachedSubCounts !== null;
+    if (!hasInstantCache) {
+      setLoadingSub(true);
+    }
+
     if (scrollOnMobile && typeof window !== 'undefined' && window.innerWidth < 1024) {
       setTimeout(() => {
         subthemesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       }, 60);
     }
     try {
-      const allSubthemes = await getCachedSubcategories(cat.id);
-      const subCounts = await getSubthemeFlashcardCounts(cat.id, allSubthemes);
+      const allSubthemes = cachedSubs ?? (await getCachedSubcategories(cat.id));
+      const subCounts = cachedSubCounts ?? (await getSubthemeFlashcardCounts(cat.id, allSubthemes));
       const masteredMap = masteredMapRef.current || {};
 
       const mastered = {};
@@ -359,13 +414,33 @@ export default function StudentFlashcardsPage() {
     let cancelled = false;
 
     const loadDashboardData = async () => {
-      setLoading(true);
-      setLoadingMetrics(true);
+      const cachedMetrics = peekCachedFlashcardMetrics(user.uid);
+      const cachedCats = peekCachedCategories();
+      const cachedCatCounts = peekCachedCategoryFlashcardCounts();
+
+      if (cachedMetrics) {
+        masteredMapRef.current = cachedMetrics.masteredCountsMap || {};
+        setCriticalQuestions(cachedMetrics.criticalQuestions || {});
+        setMetrics(cachedMetrics);
+        setLoadingMetrics(false);
+      } else {
+        setLoadingMetrics(true);
+      }
+
+      if (cachedCats && cachedCatCounts) {
+        const instantFiltered = cachedCats.filter((cat) => (cachedCatCounts[cat.id] || 0) > 0);
+        setCategories(instantFiltered);
+        setCatCardCounts(cachedCatCounts);
+        setLoading(false);
+      } else {
+        setLoading(true);
+      }
+
       try {
         // 1. Cargar especialidades desde caché y métricas del alumno en paralelo (SIN descargar toda la colección flashcards)
         const [allCategories, stats] = await Promise.all([
-          getCachedCategories(),
-          getFlashcardMetrics(user.uid),
+          cachedCats ? Promise.resolve(cachedCats) : getCachedCategories(),
+          cachedMetrics ? Promise.resolve(cachedMetrics) : getFlashcardMetrics(user.uid),
         ]);
         if (cancelled) return;
 
@@ -375,7 +450,8 @@ export default function StudentFlashcardsPage() {
         setLoadingMetrics(false);
 
         // 2. Obtener conteos por especialidad mediante getCountFromServer cacheado en sesión
-        const perCatCounts = await getCategoryFlashcardCounts(allCategories);
+        const perCatCounts =
+          cachedCatCounts || (await getCategoryFlashcardCounts(allCategories));
         if (cancelled) return;
 
         const filtered = allCategories.filter((cat) => (perCatCounts[cat.id] || 0) > 0);
@@ -387,10 +463,16 @@ export default function StudentFlashcardsPage() {
         if (filtered.length > 0) {
           const firstCat = filtered[0];
           setSelectedCat(firstCat);
-          setLoadingSub(true);
+          const cachedFirstSubs = peekCachedSubcategories(firstCat.id);
+          const cachedFirstSubCounts = peekCachedSubthemeFlashcardCounts(firstCat.id);
+
+          if (!cachedFirstSubs || !cachedFirstSubCounts) {
+            setLoadingSub(true);
+          }
           try {
-            const allSubs = await getCachedSubcategories(firstCat.id);
-            const subCounts = await getSubthemeFlashcardCounts(firstCat.id, allSubs);
+            const allSubs = cachedFirstSubs ?? (await getCachedSubcategories(firstCat.id));
+            const subCounts =
+              cachedFirstSubCounts ?? (await getSubthemeFlashcardCounts(firstCat.id, allSubs));
             if (cancelled) return;
 
             const mastered = {};
@@ -438,7 +520,7 @@ export default function StudentFlashcardsPage() {
       masteredMapRef.current = { ...masteredMapRef.current, [subtemaName]: newCount };
       setMasteredCounts((prev) => ({ ...prev, [subtemaName]: newCount }));
 
-      const stats = await getFlashcardMetrics(user.uid);
+      const stats = await getFlashcardMetrics(user.uid, null, { forceRefresh: true });
       masteredMapRef.current = stats.masteredCountsMap || {};
       setCriticalQuestions(stats.criticalQuestions || {});
       setMetrics(stats);
@@ -454,7 +536,20 @@ export default function StudentFlashcardsPage() {
     router.push(`/app/flashcards/estudio?subtema=${encodeURIComponent(subtemaName)}`);
   };
 
-  if (!isLoaded) return null;
+  if (!isLoaded || authLoading || !user) {
+    return (
+      <div
+        className={`min-h-screen flex flex-col items-center justify-center gap-3 ${
+          isDark ? 'bg-[#060A13] text-slate-200' : 'bg-[#FDF9F1] text-[#2E4A70]'
+        }`}
+      >
+        <Loader2 className={`w-8 h-8 animate-spin ${isDark ? 'text-[#24B0BA]' : 'text-[#014ba0]'}`} />
+        <span className="text-xs font-extrabold uppercase tracking-wider opacity-75">
+          Cargando tarjetas...
+        </span>
+      </div>
+    );
+  }
 
   if (!user.hasPagoUnicoAccess) return <AccessDeniedScreen user={user} isDark={isDark} swalTheme={swalTheme} />;
 
@@ -869,6 +964,9 @@ export default function StudentFlashcardsPage() {
                           <div
                             key={sub.id}
                             onClick={() => startStudy(sub.name)}
+                            onMouseEnter={() => prewarmSubtheme(sub.name)}
+                            onFocus={() => prewarmSubtheme(sub.name)}
+                            onTouchStart={() => prewarmSubtheme(sub.name)}
                             role="button"
                             tabIndex={0}
                             aria-busy={isOpening}

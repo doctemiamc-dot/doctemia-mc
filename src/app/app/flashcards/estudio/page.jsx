@@ -6,6 +6,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useTheme } from '@/context/ThemeContext';
 import {
   getDueFlashcards,
+  peekDueFlashcards,
   saveFlashcardProgress,
   getAllFlashcardsBySubtema,
   getWeakFlashcards,
@@ -355,15 +356,29 @@ function FlashcardContent() {
   const subtema = searchParams.get('subtema');
   const studyMode = searchParams.get('mode');
 
-  const [cards, setCards] = useState([]);
+  const initialPeekRef = useRef(undefined);
+  if (initialPeekRef.current === undefined) {
+    initialPeekRef.current =
+      typeof window !== 'undefined' &&
+      !authLoading &&
+      user?.uid &&
+      subtema &&
+      studyMode !== 'review_weakness'
+        ? peekDueFlashcards(user.uid, subtema)
+        : null;
+  }
+
+  const [cards, setCards] = useState(() => initialPeekRef.current ?? []);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => initialPeekRef.current === null);
   const [sessionFinished, setSessionFinished] = useState(false);
   const [isIntensiveMode, setIsIntensiveMode] = useState(false);
 
   // Controles de Mazo responsivo (Cuadrícula compacta por defecto cuando hay varias cartas)
-  const [deckLayout, setDeckLayout] = useState('grid');
+  const [deckLayout, setDeckLayout] = useState(() =>
+    (initialPeekRef.current?.length || 0) > 8 ? 'grid' : 'list'
+  );
   const [deckFilter, setDeckFilter] = useState('all');
   const [mobileDeckOpen, setMobileDeckOpen] = useState(false);
 
@@ -458,6 +473,10 @@ function FlashcardContent() {
 
   useEffect(() => {
     if (!authLoading && user?.uid && (subtema || studyMode === 'review_weakness')) {
+      if (initialPeekRef.current !== null) {
+        initialPeekRef.current = null;
+        return;
+      }
       loadCards();
     }
   }, [authLoading, user?.uid, subtema, studyMode]);
@@ -491,7 +510,20 @@ function FlashcardContent() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isFlipped, sessionFinished, cards.length, loading, currentIndex, mobileDeckOpen, zoomedImageUrl]);
 
-  const loadCards = async (forceAll = false) => {
+  const loadCards = async (forceAll = false, { bypassPeek = false } = {}) => {
+    if (!forceAll && !bypassPeek && studyMode !== 'review_weakness' && subtema && user?.uid) {
+      const cachedDue = peekDueFlashcards(user.uid, subtema);
+      if (cachedDue !== null) {
+        setSessionFinished(false);
+        setIsFlipped(false);
+        setCurrentIndex(0);
+        setCards(cachedDue);
+        setDeckLayout(cachedDue.length > 8 ? 'grid' : 'list');
+        setLoading(false);
+        return;
+      }
+    }
+
     setLoading(true);
     setSessionFinished(false);
     setIsFlipped(false);
@@ -572,7 +604,10 @@ function FlashcardContent() {
       handleNext(true);
     }
 
-    saveFlashcardProgress(user.uid, card.id, nextReviewData, subtema, rating).catch((err) => {
+    const resolvedSubtema =
+      subtema || card.subtema || card.userProgress?.subtemaName || 'General';
+
+    saveFlashcardProgress(user.uid, card.id, nextReviewData, resolvedSubtema, rating).catch((err) => {
       console.error('Error saving progress:', err);
       toast.error('No se pudo guardar tu progreso. Revisa tu conexión.');
     });
@@ -580,7 +615,8 @@ function FlashcardContent() {
 
   const handleMarkAsMastered = async () => {
     if (!cards[currentIndex]) return;
-    const card = cards[currentIndex];
+    const activeIndex = currentIndex;
+    const card = cards[activeIndex];
 
     const result = await Swal.fire({
       title: '¿Dominas este concepto?',
@@ -603,18 +639,26 @@ function FlashcardContent() {
         prevProgress.interval,
         prevProgress.repetitions
       );
+      const resolvedSubtema =
+        subtema || card.subtema || card.userProgress?.subtemaName || 'General';
 
-      try {
-        await saveFlashcardProgress(user.uid, card.id, nextReviewData, subtema, 5, true);
-        toast.success('¡Dominio registrado!', {
-          icon: '🏆',
-          style: { borderRadius: '14px', background: '#014ba0', color: '#fff', fontWeight: 'bold' },
-        });
-        setTimeout(() => handleNext(true), 250);
-      } catch (err) {
-        console.error('Error marking as mastered:', err);
-        toast.error('Error al guardar dominio.');
-      }
+      setCards((prev) =>
+        prev.map((c, idx) =>
+          idx === activeIndex ? { ...c, isRated: true, userProgress: nextReviewData } : c
+        )
+      );
+      toast.success('¡Dominio registrado!', {
+        icon: '🏆',
+        style: { borderRadius: '14px', background: '#014ba0', color: '#fff', fontWeight: 'bold' },
+      });
+      handleNext(true);
+
+      saveFlashcardProgress(user.uid, card.id, nextReviewData, resolvedSubtema, 5, true).catch(
+        (err) => {
+          console.error('Error marking as mastered:', err);
+          toast.error('Error al guardar dominio.');
+        }
+      );
     }
   };
 
@@ -696,7 +740,7 @@ function FlashcardContent() {
             onClick={() => {
               setSessionFinished(false);
               setCurrentIndex(0);
-              loadCards(isIntensiveMode);
+              loadCards(isIntensiveMode, { bypassPeek: true });
             }}
             className={`px-6 py-3.5 rounded-xl font-bold border transition-colors cursor-pointer ${
               isDark

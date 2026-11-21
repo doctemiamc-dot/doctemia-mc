@@ -416,3 +416,47 @@ Definidas en el archivo `.env` del proyecto:
    * Navegación lateral en móvil/desktop (`NavbarUser` / `AdminNavbar`), `/app/flashcards` → estudio, y `/admin/profile` (sin rastro de `/icons/user.jpg`).
 2. **Confirmar preferencia de texto en sidebar:** Validar con el usuario si desea conservar u ocultar `{adminName}` y el botón rojo `Cerrar sesión` al pie del sidebar en `AdminNavbar.jsx` (ya que en desktop también están en el header) o el enlace `Mi Perfil` en `NavbarUser.jsx`.
 3. **Mantener pendientes previos:** Revisión en navegador del modo oscuro **Midnight Clinical**, limpieza de `Agent/chat.md` y despliegue a producción (Vercel).
+
+---
+
+## 12. Handoff de Sesión (2026-11-20 — Auditoría de Pendientes, Optimización Integral de Flashcards y Preparación Vercel/Supabase)
+
+### 12.1 Revisión de Pendientes Previos (`8`, `9.2`, `10.3`)
+* Al auditar el repositorio clonado (`victor30700/doctemia-mc`), se verificó que varios puntos listados en secciones anteriores ya estaban implementados en el código:
+  * `CourseForm.jsx` ya cuenta con subida de portada (`coverInputRef`) y selector `material_type` por material.
+  * `/app/courses/page.jsx` ya aplica `limit(50)` en `courses`/`solicitudes` y `getCachedContactInfo()`.
+  * `/app/examen-test/page.jsx` ya utiliza `getCountFromServer`, paginación por cursor (`DEFAULT_PAGE_SIZE = 6`), `limit(100)` en `examAttempts` y caché de pool en `sessionStorage` (`5 min`).
+  * `/app/flashcards/page.jsx` ya había reemplazado `getDocs(collection(db, 'flashcards'))` por `getCategoryFlashcardCounts` y `getSubthemeFlashcardCounts` (`getCountFromServer`).
+  * `Agent/chat.md` ya no contiene credenciales expuestas (`Agent/chat.txt` temporal contiene solo las 2 claves públicas del nuevo proyecto Supabase; eliminar antes de hacer `git push`).
+
+### 12.2 Optimizaciones y Correcciones Implementadas en Flashcards
+1. **`src/lib/catalogCache.js`:**
+   * Agregados `peekCachedCategories()` y `peekCachedSubcategories(catId)` para hidratación síncrona (`0 ms`) sin lecturas redundantes a Firestore.
+2. **`src/lib/flashcardServices.js`:**
+   * Agregada deduplicación en vuelo (`withFcDedupe`), canal entre pestañas `BroadcastChannel('doctemia_fc_cache_v1')` (`invalidateFlashcardCache`), serialización segura de fechas ISO (`toIsoTimestamp`) y control de escrituras en vuelo (`pendingProgressWrites` / `waitForPendingProgressWrites`).
+   * Caché de métricas (`getFlashcardMetrics`, `peekCachedFlashcardMetrics`, `METRICS_TTL_MS = 5 min`) y progreso por subtema (`getCachedSubtemaProgressMap`, `SUBTEMA_PROG_TTL_MS = 3 min`) con invalidación automática en `saveFlashcardProgress`, `restoreMasteredFlashcards` y `deleteFlashcardCompleta`.
+   * Agregados `peekDueFlashcards`, `peekCachedCategoryFlashcardCounts`, `peekCachedSubthemeFlashcardCounts` y `prefetchSubthemeStudy` para precalentamiento al pasar el cursor / tocar un subtema y apertura instantánea en `/app/flashcards/estudio`.
+3. **`src/app/app/flashcards/page.jsx`:**
+   * Hidratación síncrona desde caché al montar/regresar, eliminación de imports sin uso de `firestore`, protección ante `authLoading || !user` antes de evaluar `user.hasPagoUnicoAccess`, precalentamiento de ruta y datos (`prewarmSubtheme` en `onMouseEnter`/`onFocus`/`onTouchStart`), y adaptación de `AccessDeniedScreen` a `isDark` (sin prefijos `dark:`).
+4. **`src/app/app/flashcards/estudio/page.jsx` y `src/app/app/flashcards/estudio/loading.jsx` (nuevo):**
+   * Hidratación síncrona inicial con `peekDueFlashcards` cuando el subtema ya fue precalentado/cacheado + esqueleto `loading.jsx` adaptado a `isDark`.
+   * Corregido bug en modo `review_weakness` donde `subtema` era `null` y sobrescribía `subtemaName` a `'General'` al guardar (`subtema || card.subtema || card.userProgress?.subtemaName || 'General'`).
+   * Convertido `handleMarkAsMastered` (*"Ya domino esto"*) a actualización optimista tras confirmar en el modal.
+5. **`src/app/admin/flashcards/new/page.jsx` y `src/app/admin/flashcards/edit/[id]/page.jsx`:**
+   * Invocan `invalidateFlashcardCache()` tras crear o editar una tarjeta.
+
+### 12.3 Verificación Técnica Ejecutada
+* **Invariantes intactos (`git diff --exit-code`):** `0` cambios en `ProtectedVideoPlayer.jsx`, `youtubeUtils.js`, `driveUtils.js` y `next.config.js`.
+* **SWC (`next/dist/build/swc`) + regla de tema:** `7/7` archivos compilados (`SWC=OK`, `darkMatches=0`).
+* **Auditoría UI (`impeccable detect --json`):** `[]` en `flashcards/page.jsx`, `flashcards/estudio/page.jsx` y `flashcards/estudio/loading.jsx`.
+* **Build de producción (`next build`, Next.js 16.2.1 Turbopack):** compilado completo con **54/54** rutas generadas (ejecutado con variables de entorno temporales en memoria para validar bundling, ya que este clon aún no posee `.env` en disco).
+* **Nota ESLint:** `eslint` (`9.39.4`) reporta error preexistente de `FlatCompat` (`Converting circular structure to JSON`) en `eslint.config.mjs`.
+
+### 12.4 Pendientes antes de Producción (GitHub + Vercel)
+1. Eliminar `Agent/chat.txt` antes de hacer `git commit` / `git push` hacia `victor30700/doctemia-mc`.
+2. Configurar en **Vercel → Environment Variables** para el nuevo Supabase (`xjbwtxixlrqbigsptliw`):
+   * `NEXT_PUBLIC_SUPABASE_URL`
+   * `NEXT_PUBLIC_SUPABASE_ANON_KEY` *(usar el valor de la clave pública `sb_publishable_...`, no el nombre `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`)*
+   * `SUPABASE_SERVICE_ROLE_KEY`
+   * `DATABASE_URL` *(Transaction Pooler IPv4 puerto `:6543`)*
+   * Confirmar migraciones `001`–`003` y bucket privado `materials` en el nuevo Supabase, y realizar **Redeploy**.

@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { getCachedCategories, getCachedSubcategories } from '@/lib/catalogCache';
+import { invalidateFlashcardCache } from '@/lib/flashcardServices';
 import { useRouter } from 'next/navigation';
 import { useTheme } from '@/context/ThemeContext';
 import { formatDriveUrl } from '@/lib/driveUtils';
@@ -163,6 +164,7 @@ export default function NewFlashcardPage() {
         tags: tagsArray,
         createdAt: serverTimestamp(),
       });
+      invalidateFlashcardCache();
 
       await Swal.fire({
         icon: 'success',

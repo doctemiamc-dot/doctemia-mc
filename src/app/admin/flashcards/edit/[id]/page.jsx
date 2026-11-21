@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { getCachedCategories, getCachedSubcategories } from '@/lib/catalogCache';
+import { invalidateFlashcardCache } from '@/lib/flashcardServices';
 import { useRouter, useParams } from 'next/navigation';
 import { useTheme } from '@/context/ThemeContext';
 import { formatDriveUrl } from '@/lib/driveUtils';
@@ -195,6 +196,7 @@ export default function EditFlashcardPage() {
         tags: tagsArray,
         updatedAt: serverTimestamp(),
       });
+      invalidateFlashcardCache();
 
       await Swal.fire({
         icon: 'success', title: '¡Actualizada!', text: 'La flashcard ha sido actualizada correctamente.',

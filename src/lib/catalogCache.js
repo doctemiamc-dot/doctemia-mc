@@ -112,6 +112,13 @@ async function withDedupe(key, ttlMs, forceRefresh, loaderFn) {
 }
 
 /**
+ * Busca síncronamente las especialidades cacheadas (`0 ms`, sin lecturas a Firestore).
+ */
+export function peekCachedCategories() {
+  return readCache('categories', DEFAULT_TTL_MS);
+}
+
+/**
  * Obtiene las especialidades (`course_categories`) con tope de seguridad y caché de sesión.
  */
 export async function getCachedCategories({ forceRefresh = false } = {}) {
@@ -121,6 +128,14 @@ export async function getCachedCategories({ forceRefresh = false } = {}) {
     cats.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     return cats;
   });
+}
+
+/**
+ * Busca síncronamente los subtemas cacheados de una especialidad (`0 ms`, sin lecturas a Firestore).
+ */
+export function peekCachedSubcategories(catId) {
+  if (!catId) return null;
+  return readCache(`subcategories_${catId}`, DEFAULT_TTL_MS);
 }
 
 /**
