@@ -6,12 +6,13 @@ import { useRouter } from 'next/navigation';
 import NavbarUser from '@/app/components/layout/NavbarUser';  // <-- Importa NavbarUser aquí
 
 export default function UserLayout({ children }) {
-  const { user, loading } = useAuth();
+  const { user, loading, firebaseAuthUser } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
+    let cancelled = false;
     const logoutAndRedirect = async () => {
-      if (!loading && !user) {
+      if (!loading && !user && !firebaseAuthUser) {
         try {
           // Llamar a la API de logout para limpiar cookies residuales (__session)
           await fetch('/api/logout', { method: 'POST' });
@@ -19,15 +20,18 @@ export default function UserLayout({ children }) {
           console.error('Error al limpiar sesión:', error);
         } finally {
           // Redirigir al login después de intentar limpiar la sesión
-          router.replace('/login');
+          if (!cancelled) router.replace('/login');
         }
       }
     };
 
     logoutAndRedirect();
-  }, [loading, user, router]);
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, user, firebaseAuthUser, router]);
 
-  if (loading) {
+  if (loading || (!user && firebaseAuthUser)) {
     return (
       <div className="flex justify-center items-center min-h-screen">
         <p>Cargando...</p>

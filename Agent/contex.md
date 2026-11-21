@@ -452,11 +452,13 @@ Definidas en el archivo `.env` del proyecto:
 * **Build de producción (`next build`, Next.js 16.2.1 Turbopack):** compilado completo con **54/54** rutas generadas (ejecutado con variables de entorno temporales en memoria para validar bundling, ya que este clon aún no posee `.env` en disco).
 * **Nota ESLint:** `eslint` (`9.39.4`) reporta error preexistente de `FlatCompat` (`Converting circular structure to JSON`) en `eslint.config.mjs`.
 
-### 12.4 Pendientes antes de Producción (GitHub + Vercel)
-1. Eliminar `Agent/chat.txt` antes de hacer `git commit` / `git push` hacia `victor30700/doctemia-mc`.
-2. Configurar en **Vercel → Environment Variables** para el nuevo Supabase (`xjbwtxixlrqbigsptliw`):
-   * `NEXT_PUBLIC_SUPABASE_URL`
-   * `NEXT_PUBLIC_SUPABASE_ANON_KEY` *(usar el valor de la clave pública `sb_publishable_...`, no el nombre `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`)*
-   * `SUPABASE_SERVICE_ROLE_KEY`
-   * `DATABASE_URL` *(Transaction Pooler IPv4 puerto `:6543`)*
-   * Confirmar migraciones `001`–`003` y bucket privado `materials` en el nuevo Supabase, y realizar **Redeploy**.
+### 12.4 Estado de Producción (GitHub + Vercel)
+1. Eliminado `Agent/chat.txt` tras verificar en vivo las 5 variables del nuevo Supabase (`xjbwtxixlrqbigsptliw`, bucket `materials` y 4 tablas) y subido commit `656487c` a `victor30700/doctemia-mc` (`main`).
+
+### 12.5 Corrección de Condición de Carrera al Iniciar Sesión (Admin y Estudiantes)
+* **Causa raíz:** al iniciar sesión en `src/app/login/page.jsx`, `onAuthStateChanged` en `src/context/AuthContext.jsx` recibía `fbUser` sin restablecer `loading = true` de forma síncrona mientras resolvía `getIdTokenResult` y el primer `onSnapshot(users/{uid})`. Al navegar inmediatamente a `/admin`, `src/app/admin/layout.jsx` evaluaba `!loading && !user`, disparaba `/api/logout` (borrando `__session` y `role`) y devolvía al usuario a `/login`.
+* **Cambios aplicados y verificados:**
+  * `src/context/AuthContext.jsx`: establece `setLoading(true)` de forma síncrona al detectar `fbUser`, incorpora control de secuencia (`authEventSeq`) e `isMounted`, y bloquea `onIdTokenChanged` durante `signOut` (`isSigningOutRef`).
+  * `src/app/admin/layout.jsx` y `src/app/app/layout.jsx`: verifican `!firebaseAuthUser` antes de limpiar sesión y añaden cancelación en el `useEffect` para evitar redirecciones/logouts tardíos.
+  * `src/app/login/page.jsx`: usa `user.getIdToken()` y guarda `__doctemia_synced_id_token` antes de `POST /api/login` para evitar envíos duplicados desde `onIdTokenChanged`.
+  * **Verificación:** `4/4` archivos compilados con SWC (`SWC=OK`, `darkMatches=0`), `impeccable detect --json` `[]`, y `next build` (`54/54` rutas) exitoso.

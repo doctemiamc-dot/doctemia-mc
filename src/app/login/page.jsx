@@ -37,7 +37,15 @@ export default function LoginPage() {
     try {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
-      const idToken = await user.getIdToken(true);
+      const idToken = await user.getIdToken();
+
+      // Marcar antes de /api/login para evitar que onIdTokenChanged dispare un POST duplicado
+      try {
+        window.sessionStorage.setItem('__doctemia_synced_id_token', idToken);
+      } catch {
+        // Ignorar errores de sessionStorage
+      }
+
       const response = await fetch('/api/login', {
         method: 'POST',
         headers: {
@@ -48,13 +56,12 @@ export default function LoginPage() {
       });
       const data = await response.json();
       if (!response.ok) {
+        try {
+          window.sessionStorage.removeItem('__doctemia_synced_id_token');
+        } catch {
+          // Ignorar errores de sessionStorage
+        }
         throw new Error(data.error || 'Error en el servidor durante el login');
-      }
-
-      try {
-        window.sessionStorage.setItem('__doctemia_synced_id_token', idToken);
-      } catch {
-        // Ignorar errores de sessionStorage
       }
 
       // Aviso no bloqueante para redirección instantánea

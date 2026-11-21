@@ -38,6 +38,7 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [firebaseAuthUser, setFirebaseAuthUser] = useState(null);
   const isExpiringOutRef = useRef(false);
+  const isSigningOutRef = useRef(false);
   const lastSyncedTokenRef = useRef(null);
 
   const forceServerLogout = useCallback(async (expired = false) => {
@@ -50,6 +51,7 @@ export function AuthProvider({ children }) {
     } finally {
       setUser(null);
       setRole(null);
+      lastSyncedTokenRef.current = null;
       setStoredSyncedToken(null);
       setLoading(false);
       router.replace(expired ? '/login?expired=1' : '/login');
@@ -57,6 +59,8 @@ export function AuthProvider({ children }) {
   }, [router]);
 
   useEffect(() => {
+    let isMounted = true;
+    let authEventSeq = 0;
     setLoading(true);
     let unsubFirestore = null;
     let expirationTimer = null;
@@ -73,20 +77,24 @@ export function AuthProvider({ children }) {
     };
 
     const unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
+      const seq = ++authEventSeq;
       cleanupListeners();
       setFirebaseAuthUser(fbUser);
 
       if (fbUser) {
+        setLoading(true);
         isExpiringOutRef.current = false;
         try {
           // Aprovecha caché válida del token para acelerar la carga inicial de sesión
           const tokenResult = await getIdTokenResult(fbUser, false);
+          if (!isMounted || seq !== authEventSeq) return;
           const emailFallback = fbUser.email === (process.env.NEXT_PUBLIC_ADMIN_EMAIL || 'admin@admin.com') ? 'admin' : 'user';
           const assignedRole = tokenResult.claims.role || emailFallback;
           setRole(assignedRole);
 
           const userDocRef = doc(db, 'users', fbUser.uid);
           unsubFirestore = onSnapshot(userDocRef, async (docSnap) => {
+            if (!isMounted || seq !== authEventSeq) return;
             if (docSnap.exists()) {
               const docData = docSnap.data();
 
@@ -137,24 +145,29 @@ export function AuthProvider({ children }) {
 
               try {
                 await setDoc(userDocRef, newUserProfile);
+                if (!isMounted || seq !== authEventSeq) return;
                 setUser({
                   uid: fbUser.uid,
                   ...newUserProfile
                 });
               } catch (error) {
                 console.error("AuthContext: FAILED to create user document:", error);
-                signOut();
+                await forceServerLogout(false);
               } finally {
-                setLoading(false);
+                if (isMounted && seq === authEventSeq) {
+                  setLoading(false);
+                }
               }
             }
           }, (error) => {
+            if (!isMounted || seq !== authEventSeq) return;
             console.error("AuthContext: Error listening to Firestore user document:", error);
             setUser({ uid: fbUser.uid, email: fbUser.email, displayName: fbUser.displayName });
             setLoading(false);
           });
 
         } catch (error) {
+          if (!isMounted || seq !== authEventSeq) return;
           console.error("AuthContext: Error getting token result or setting up Firestore listener:", error);
           setUser(null);
           setRole(null);
@@ -177,9 +190,12 @@ export function AuthProvider({ children }) {
         setStoredSyncedToken(null);
         return;
       }
+      if (isSigningOutRef.current || isExpiringOutRef.current) {
+        return;
+      }
       try {
         const freshToken = await fbUser.getIdToken();
-        const storedToken = lastSyncedTokenRef.current || getStoredSyncedToken();
+        const storedToken = getStoredSyncedToken() || lastSyncedTokenRef.current;
         if (freshToken && freshToken !== storedToken) {
           lastSyncedTokenRef.current = freshToken;
           setStoredSyncedToken(freshToken);
@@ -195,6 +211,7 @@ export function AuthProvider({ children }) {
     });
 
     return () => {
+      isMounted = false;
       cleanupListeners();
       unsubAuth();
       unsubIdToken();
@@ -202,6 +219,7 @@ export function AuthProvider({ children }) {
   }, [forceServerLogout]);
 
   const signOut = async () => {
+    isSigningOutRef.current = true;
     setLoading(true);
     console.log('AuthContext: Iniciando signOut...');
     try {
@@ -212,12 +230,18 @@ export function AuthProvider({ children }) {
         console.log('AuthContext: Llamada a /api/logout exitosa.');
       }
       await fbSignOut(auth);
+      lastSyncedTokenRef.current = null;
       setStoredSyncedToken(null);
+      setUser(null);
+      setRole(null);
       console.log('AuthContext: Firebase signOut completado.');
-      router.push('/login');
+      router.replace('/login');
     } catch (error) {
       console.error('AuthContext: Error durante signOut:', error);
-      router.push('/login');
+      router.replace('/login');
+    } finally {
+      isSigningOutRef.current = false;
+      setLoading(false);
     }
   };
 

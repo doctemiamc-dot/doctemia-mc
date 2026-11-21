@@ -7,31 +7,38 @@ import { useRouter } from 'next/navigation';
 import AdminNavbar from '@/app/components/layout/AdminNavbar';
 
 export default function AdminLayout({ children }) {
-  const { user, role, loading } = useAuth();
+  const { user, role, loading, firebaseAuthUser } = useAuth();
   const { isDark } = useTheme();
   const router = useRouter();
 
   useEffect(() => {
+    let cancelled = false;
     const logoutAndRedirect = async () => {
-      if (!loading) {
-        if (!user) {
-          try {
-            await fetch('/api/logout', { method: 'POST' });
-          } catch (error) {
-            console.error('Error al limpiar sesión:', error);
-          } finally {
-            router.replace('/login');
-          }
-          return;
-        }
+      if (loading) return;
 
-        const isAdmin = role === 'admin';
-        if (!isAdmin) return router.replace('/app');
+      if (!user) {
+        // Si Firebase Auth aún tiene sesión activa mientras resuelve el perfil, no cerrar sesión
+        if (firebaseAuthUser) return;
+        try {
+          await fetch('/api/logout', { method: 'POST' });
+        } catch (error) {
+          console.error('Error al limpiar sesión:', error);
+        } finally {
+          if (!cancelled) router.replace('/login');
+        }
+        return;
+      }
+
+      if (role !== 'admin') {
+        router.replace('/app');
       }
     };
 
     logoutAndRedirect();
-  }, [loading, user, role, router]);
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, user, role, firebaseAuthUser, router]);
 
   if (loading || !user) {
     return (
@@ -47,7 +54,9 @@ export default function AdminLayout({ children }) {
             }`}
           />
           <p className={`text-lg font-medium ${isDark ? 'text-slate-300' : 'text-gray-600'}`}>
-            {loading ? 'Cargando...' : 'Limpiando sesión e iniciando redirección al login...'}
+            {loading || firebaseAuthUser
+              ? 'Cargando...'
+              : 'Limpiando sesión e iniciando redirección al login...'}
           </p>
         </div>
       </div>
